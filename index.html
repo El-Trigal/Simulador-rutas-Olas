@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Simulador de transporte finca</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="side-panel" aria-label="Panel de simulacion">
+        <header class="app-header">
+          <h1>Simulador de transporte</h1>
+          <div id="dataStatus" class="status-line">Cargando datos...</div>
+        </header>
+
+        <div id="consultView" class="panel-view active simulator-view">
+          <section class="control-section form-grid">
+            <div class="section-title">Plan del dia</div>
+            <div id="simBlockPlan" class="block-plan-list"></div>
+            <button id="addPlanBlockButton" class="secondary-action add-plan-button" type="button">Anadir bloque</button>
+            <div class="segmented transport-segmented" role="tablist" aria-label="Metodo de transporte">
+              <button class="transport-button active" data-transport="cable" type="button">Garruchas</button>
+              <button class="transport-button" data-transport="tractor" type="button">Tractor</button>
+              <button class="transport-button" data-transport="both" type="button">Ambos</button>
+            </div>
+          </section>
+
+          <section class="control-section simulator-grid">
+            <div class="section-title">Demanda semanal</div>
+            <label class="field"><span>Pompon</span><input id="simPomponDemand" type="number" min="0" step="1000" value="600000" /></label>
+            <label class="field"><span>Spider</span><input id="simSpiderDemand" type="number" min="0" step="1000" value="450000" /></label>
+            <label class="field"><span>Supermun</span><input id="simSupermunDemand" type="number" min="0" step="1000" value="20000" /></label>
+            <label class="field"><span>Tallos por balde</span><input id="simBucketStems" type="number" min="1" step="1" value="150" /></label>
+            <label class="field"><span>Horas semanales</span><input id="simWeeklyHours" type="number" min="0" step="0.5" value="43.5" /></label>
+          </section>
+
+          <section class="control-section simulator-grid">
+            <div class="section-title">Garruchas</div>
+            <label class="field"><span>Garrucheros disp.</span><input id="simGarruchas" type="number" min="0" max="4" step="1" value="4" /></label>
+            <label class="field"><span>Vagones</span><input id="simWagons" type="number" min="1" max="13" step="1" value="13" /></label>
+            <label class="field"><span>Baldes por vagon</span><input id="simBucketsPerWagon" type="number" min="1" max="2" step="1" value="2" /></label>
+            <label class="field"><span>Velocidad</span><input id="simCableSpeed" type="number" min="1" max="350" step="1" value="55" /></label>
+          </section>
+
+          <section class="control-section simulator-grid">
+            <div class="section-title">Tractor</div>
+            <label class="field"><span>Conductores disp.</span><input id="simTractors" type="number" min="0" max="2" step="1" value="2" /></label>
+            <label class="field"><span>Trailers</span><input id="simTrailers" type="number" min="1" max="7" step="1" value="7" /></label>
+            <label class="field"><span>Baldes por trailer</span><input id="simBucketsPerTrailer" type="number" min="1" max="12" step="1" value="12" /></label>
+            <label class="field"><span>Velocidad</span><input id="simTractorSpeed" type="number" min="1" max="350" step="1" value="250" /></label>
+          </section>
+
+          <button id="routeButton" class="primary-action" type="button">Simular viaje</button>
+
+          <section class="results-panel" aria-live="polite">
+            <div class="section-title">Resultado</div>
+            <div class="metric-grid simulator-metrics">
+              <div class="metric"><span>Destino</span><strong id="simDestinationMetric">-</strong></div>
+              <div class="metric"><span>Demanda sem.</span><strong id="simDemandMetric">-</strong></div>
+              <div class="metric"><span>Demanda dia</span><strong id="simDailyDemandMetric">-</strong></div>
+              <div class="metric"><span>Meta hora</span><strong id="simHourlyDemandMetric">-</strong></div>
+              <div class="metric"><span>Baldes/dia</span><strong id="simBucketsMetric">-</strong></div>
+              <div class="metric"><span>Cortadores</span><strong id="simCutMetric">-</strong></div>
+            </div>
+            <div class="playback-panel">
+              <div class="playback-row">
+                <button id="simPlayButton" class="secondary-action" type="button">Reproducir</button>
+                <button id="simResetButton" class="secondary-action" type="button">Reiniciar</button>
+                <strong id="simClock">00:00</strong>
+              </div>
+              <label class="field">
+                <span>Velocidad de simulacion <strong id="simPlaybackSpeedLabel">10x</strong></span>
+                <input id="simPlaybackSpeed" class="speed-range" type="range" min="1" max="100" step="1" value="10" />
+              </label>
+              <div id="simPhaseText" class="route-summary">Calcula un viaje para reproducirlo.</div>
+            </div>
+            <div id="routeSummary" class="route-summary">Sin simulacion.</div>
+            <div id="simMethodResults" class="method-results"></div>
+          </section>
+        </div>
+
+        <section class="legend-section">
+          <div class="section-title">Capas</div>
+          <div class="legend-list">
+            <span><i class="swatch block"></i>Bloques</span>
+            <span><i class="swatch cable"></i>Cable via</span>
+            <span><i class="swatch tractor"></i>Tractor</span>
+            <span><i class="swatch post"></i>Poscosechas</span>
+            <span><i class="swatch water"></i>Lagos</span>
+            <span><i class="swatch route"></i>Ruta</span>
+          </div>
+        </section>
+      </aside>
+
+      <div class="workspace simulator-workspace">
+        <main class="map-panel">
+          <div class="map-toolbar" aria-label="Herramientas de mapa">
+            <button id="zoomIn" type="button" title="Acercar">+</button>
+            <button id="zoomOut" type="button" title="Alejar">-</button>
+            <button id="fitMap" type="button" title="Ajustar mapa">Ajustar</button>
+            <button id="clearRoute" type="button" title="Limpiar ruta">Limpiar</button>
+          </div>
+          <svg id="mapSvg" role="img" aria-label="Mapa de bloques y rutas">
+            <g id="mapRoot">
+              <g id="lakeLayer"></g>
+              <g id="blockLayer"></g>
+              <g id="cableLayer"></g>
+              <g id="tractorLayer"></g>
+              <g id="postLayer"></g>
+              <g id="connectorLayer"></g>
+              <g id="routeLayer"></g>
+              <g id="trackingRouteLayer"></g>
+              <g id="simulationLayer"></g>
+              <g id="labelLayer"></g>
+              <g id="trackingLayer"></g>
+            </g>
+          </svg>
+          <div id="mapHint" class="map-hint">Listo</div>
+        </main>
+      </div>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

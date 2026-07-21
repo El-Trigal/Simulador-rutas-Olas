@@ -71,6 +71,7 @@ const state = {
   route: null,
   simRoutes: [],
   planRows: [],
+  useDailyBlockDemand: false,
   simulation: {
     vehicles: [],
     loads: [],
@@ -118,6 +119,7 @@ const els = {
   simFlowerSelect: document.getElementById("simFlowerSelect"),
   simBlockSelect: document.getElementById("simBlockSelect"),
   simBlockPlan: document.getElementById("simBlockPlan"),
+  simDailyDemandToggle: document.getElementById("simDailyDemandToggle"),
   addPlanBlockButton: document.getElementById("addPlanBlockButton"),
   simPomponDemand: document.getElementById("simPomponDemand"),
   simSpiderDemand: document.getElementById("simSpiderDemand"),
@@ -1411,6 +1413,7 @@ function createPlanRow(blockId = null, flowerKey = "pompon") {
     id: `plan-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     blockId: blockId || nextAvailableBlockId() || defaultBlockId(),
     flowerKey: FLOWER_CONFIGS[flowerKey] ? flowerKey : "pompon",
+    dailyDemand: 0,
   };
 }
 
@@ -1424,13 +1427,45 @@ function addPlanRow(blockId = null, flowerKey = "pompon") {
   calculateSimulation();
 }
 
+function weeklyDailyDemandForRow(row) {
+  const flowerKey = FLOWER_CONFIGS[row.flowerKey] ? row.flowerKey : "pompon";
+  const flower = FLOWER_CONFIGS[flowerKey];
+  const count = Math.max(1, state.planRows.filter((item) => item.flowerKey === flowerKey).length);
+  const weeklyDemand = Math.max(0, readNumber(els[flower.demandInput], flower.defaultDemand));
+  return weeklyDemand / WORK_DAYS_PER_WEEK / count;
+}
+
+function seedDailyDemandFromWeekly() {
+  for (const row of state.planRows) {
+    const current = Number(row.dailyDemand);
+    if (Number.isFinite(current) && current > 0) continue;
+    row.dailyDemand = Math.round(weeklyDailyDemandForRow(row));
+  }
+}
+
+function updateDailyDemandToggle() {
+  if (!els.simDailyDemandToggle) return;
+  els.simDailyDemandToggle.classList.toggle("active", state.useDailyBlockDemand);
+  els.simDailyDemandToggle.textContent = state.useDailyBlockDemand
+    ? "Usando tallos diarios por bloque"
+    : "Usar tallos diarios por bloque";
+}
+
+function toggleDailyBlockDemand() {
+  state.useDailyBlockDemand = !state.useDailyBlockDemand;
+  if (state.useDailyBlockDemand) seedDailyDemandFromWeekly();
+  renderPlanRows();
+  calculateSimulation();
+}
+
 function renderPlanRows() {
   if (!els.simBlockPlan) return;
   ensurePlanRows();
   clearElement(els.simBlockPlan);
+  updateDailyDemandToggle();
   state.planRows.forEach((row, index) => {
     const item = document.createElement("div");
-    item.className = "block-plan-row";
+    item.className = `block-plan-row ${state.useDailyBlockDemand ? "daily-demand-row" : ""}`;
 
     const order = document.createElement("div");
     order.className = "block-plan-index";
@@ -1474,6 +1509,24 @@ function renderPlanRows() {
     });
     flowerField.append(flowerLabel, flowerSelect);
 
+    let dailyField = null;
+    if (state.useDailyBlockDemand) {
+      dailyField = document.createElement("label");
+      dailyField.className = "field compact daily-demand-field";
+      const dailyLabel = document.createElement("span");
+      dailyLabel.textContent = "Tallos dia";
+      const dailyInput = document.createElement("input");
+      dailyInput.type = "number";
+      dailyInput.min = "0";
+      dailyInput.step = "1";
+      dailyInput.value = String(Math.max(0, Math.round(Number(row.dailyDemand) || 0)));
+      dailyInput.addEventListener("input", () => {
+        row.dailyDemand = Math.max(0, Number(dailyInput.value) || 0);
+        calculateSimulation();
+      });
+      dailyField.append(dailyLabel, dailyInput);
+    }
+
     const removeButton = document.createElement("button");
     removeButton.className = "block-plan-remove";
     removeButton.type = "button";
@@ -1486,7 +1539,9 @@ function renderPlanRows() {
       calculateSimulation();
     });
 
-    item.append(order, blockField, flowerField, removeButton);
+    item.append(order, blockField, flowerField);
+    if (dailyField) item.appendChild(dailyField);
+    item.appendChild(removeButton);
     els.simBlockPlan.appendChild(item);
   });
 }
@@ -1504,7 +1559,8 @@ function selectedPlanRows() {
       const flowerKey = FLOWER_CONFIGS[row.flowerKey] ? row.flowerKey : "pompon";
       const flower = FLOWER_CONFIGS[flowerKey];
       const post = entityByTypeAndId("post", flower.postId);
-      return block && post ? { ...row, block, flowerKey, flower, post } : null;
+      const dailyDemand = state.useDailyBlockDemand ? Math.max(0, Number(row.dailyDemand) || 0) : null;
+      return block && post ? { ...row, block, flowerKey, flower, post, dailyDemand } : null;
     })
     .filter(Boolean);
 }
@@ -1514,28 +1570,19 @@ function demandPlanByFlower(planRows, weeklyHours = 0) {
   for (const row of planRows) counts.set(row.flowerKey, (counts.get(row.flowerKey) || 0) + 1);
   const dailyHours = weeklyHours / WORK_DAYS_PER_WEEK;
   const demandByFlower = new Map();
+  const manualMode = state.useDailyBlockDemand;
   for (const [flowerKey, count] of counts) {
     const flower = FLOWER_CONFIGS[flowerKey];
-    const weeklyDemand = Math.max(0, readNumber(els[flower.demandInput], flower.defaultDemand));
-    const dailyDemand = weeklyDemand / WORK_DAYS_PER_WEEK;
+    const rowsForFlower = planRows.filter((row) => row.flowerKey === flowerKey);
+    const weeklyDemandInput = Math.max(0, readNumber(els[flower.demandInput], flower.defaultDemand));
+    const dailyDemand = manualMode ? rowsForFlower.reduce((sum, row) => sum + Math.max(0, Number(row.dailyDemand) || 0), 0) : weeklyDemandInput / WORK_DAYS_PER_WEEK;
+    const weeklyDemand = manualMode ? dailyDemand * WORK_DAYS_PER_WEEK : weeklyDemandInput;
     const cutterHoursWeek = flower.cutterRate > 0 ? weeklyDemand / flower.cutterRate : 0;
     const cutterHoursDay = flower.cutterRate > 0 ? dailyDemand / flower.cutterRate : 0;
     const cuttersWeek = weeklyHours > 0 ? cutterHoursWeek / weeklyHours : 0;
     const cuttersDay = dailyHours > 0 ? cutterHoursDay / dailyHours : 0;
     const perBlockDemand = count > 0 ? dailyDemand / count : 0;
-    demandByFlower.set(flowerKey, {
-      count,
-      flower,
-      weeklyDemand,
-      dailyDemand,
-      perBlockDemand,
-      cutterHoursWeek,
-      cutterHoursDay,
-      cuttersWeek,
-      cuttersDay,
-      cuttersPerBlock: count > 0 ? cuttersDay / count : 0,
-      stemsPerBlockHour: dailyHours > 0 ? perBlockDemand / dailyHours : 0,
-    });
+    demandByFlower.set(flowerKey, { count, flower, weeklyDemand, dailyDemand, perBlockDemand, cutterHoursWeek, cutterHoursDay, cuttersWeek, cuttersDay, cuttersPerBlock: count > 0 ? cuttersDay / count : 0, stemsPerBlockHour: dailyHours > 0 ? perBlockDemand / dailyHours : 0, manualMode });
   }
   return demandByFlower;
 }
@@ -1756,8 +1803,9 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
 
   for (const row of planRows) {
     const demandInfo = demandByFlower.get(row.flowerKey);
-    const blockDemand = demandInfo?.perBlockDemand || 0;
-    const cuttersNeeded = demandInfo?.cuttersPerBlock || 0;
+    const blockDemand = state.useDailyBlockDemand ? Math.max(0, Number(row.dailyDemand) || 0) : (demandInfo?.perBlockDemand || 0);
+    const dailyWorkHours = dailyWorkMinutes / 60;
+    const cuttersNeeded = dailyWorkHours > 0 && row.flower.cutterRate > 0 ? (blockDemand / dailyWorkHours) / row.flower.cutterRate : 0;
     const productionPerMinute = cuttersNeeded * row.flower.cutterRate / 60;
     const tripsNeeded = input.stemsPerTrip > 0 ? Math.ceil(blockDemand / input.stemsPerTrip) : 0;
     const loadedRoute = cachedRoute(row.block, row.post);
@@ -2133,6 +2181,7 @@ function renderCutterSummaryCard(demandByFlower) {
     ["Cortadores sem.", infos.reduce((sum, info) => sum + info.cuttersWeek, 0).toFixed(1)],
     ["Horas corte dia", formatHours(infos.reduce((sum, info) => sum + info.cutterHoursDay, 0))],
     ["Meta tallos/h", formatInteger(infos.reduce((sum, info) => sum + (info.dailyDemand / Math.max(0.0001, inputDailyHours())), 0))],
+    ["Modo demanda", infos.some((info) => info.manualMode) ? "Diaria manual" : "Semanal"],
   ];
   for (const [label, value] of totals) {
     const item = document.createElement("div");
@@ -2260,8 +2309,13 @@ function calculateSimulation() {
   updateSelectionStyles();
 
   const selectedFlowerKeys = new Set(planRows.map((row) => row.flowerKey));
-  const weeklyDemand = [...selectedFlowerKeys].reduce((sum, key) => sum + (demandByFlower.get(key)?.weeklyDemand || 0), 0);
-  const dailyDemand = planRows.reduce((sum, row) => sum + (demandByFlower.get(row.flowerKey)?.perBlockDemand || 0), 0);
+  const dailyDemand = planRows.reduce((sum, row) => {
+    const info = demandByFlower.get(row.flowerKey);
+    return sum + (state.useDailyBlockDemand ? Math.max(0, Number(row.dailyDemand) || 0) : (info?.perBlockDemand || 0));
+  }, 0);
+  const weeklyDemand = state.useDailyBlockDemand
+    ? dailyDemand * WORK_DAYS_PER_WEEK
+    : [...selectedFlowerKeys].reduce((sum, key) => sum + (demandByFlower.get(key)?.weeklyDemand || 0), 0);
   const dailyHours = weeklyHours / WORK_DAYS_PER_WEEK;
   const hourlyDemand = dailyHours > 0 ? dailyDemand / dailyHours : 0;
   const bucketsNeeded = Math.ceil(dailyDemand / bucketStems);
@@ -2274,7 +2328,7 @@ function calculateSimulation() {
   const feasibleText = results.length ? (results.every((result) => result.feasible) ? "La flota calculada cabe en la jornada." : "La flota disponible no alcanza para la jornada.") : "";
 
   els.simDestinationMetric.textContent = destinationLabels;
-  els.simDemandMetric.textContent = formatInteger(weeklyDemand);
+  els.simDemandMetric.textContent = state.useDailyBlockDemand ? "Diaria manual" : formatInteger(weeklyDemand);
   els.simDailyDemandMetric.textContent = formatInteger(dailyDemand);
   els.simHourlyDemandMetric.textContent = `${formatInteger(hourlyDemand)}/h`;
   els.simBucketsMetric.textContent = formatInteger(bucketsNeeded);
@@ -2461,6 +2515,7 @@ function bindEvents() {
     els.simTractorSpeed,
   ].filter(Boolean);
   for (const control of simulationControls) control.addEventListener("input", calculateSimulation);
+  els.simDailyDemandToggle?.addEventListener("click", toggleDailyBlockDemand);
   els.addPlanBlockButton?.addEventListener("click", () => addPlanRow());
   els.routeButton?.addEventListener("click", calculateSimulation);
   els.simPlayButton?.addEventListener("click", toggleSimulationPlayback);

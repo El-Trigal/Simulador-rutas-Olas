@@ -75,6 +75,15 @@
                 <input id="simPlaybackSpeed" class="speed-range" type="range" min="1" max="100" step="1" value="10" />
               </label>
               <div id="simPhaseText" class="route-summary">Calcula un viaje para reproducirlo.</div>
+              <div class="cutter-live-panel">
+                <div class="cutter-live-header">
+                  <span>Cortadores por bloque</span>
+                  <strong id="simCutterLiveTotal">0 activos</strong>
+                </div>
+                <div id="simCutterLive" class="cutter-live-list">
+                  <div class="cutter-live-empty">Sin plan calculado.</div>
+                </div>
+              </div>
             </div>
             <div id="routeSummary" class="route-summary">Sin simulacion.</div>
             <div id="simMethodResults" class="method-results"></div>
@@ -112,6 +121,7 @@
               <g id="connectorLayer"></g>
               <g id="routeLayer"></g>
               <g id="trackingRouteLayer"></g>
+              <g id="cutterLayer"></g>
               <g id="simulationLayer"></g>
               <g id="labelLayer"></g>
               <g id="trackingLayer"></g>

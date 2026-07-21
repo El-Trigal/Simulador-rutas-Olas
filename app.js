@@ -75,6 +75,8 @@ const state = {
   simulation: {
     vehicles: [],
     loads: [],
+    cutterBlocks: [],
+    cutterFrameKey: "__reset__",
     timeMinutes: 0,
     durationMinutes: 0,
     speedMultiplier: 10,
@@ -99,6 +101,7 @@ const els = {
   postLayer: document.getElementById("postLayer"),
   routeLayer: document.getElementById("routeLayer"),
   connectorLayer: document.getElementById("connectorLayer"),
+  cutterLayer: document.getElementById("cutterLayer"),
   simulationLayer: document.getElementById("simulationLayer"),
   labelLayer: document.getElementById("labelLayer"),
   originLabel: document.getElementById("originLabel"),
@@ -147,6 +150,8 @@ const els = {
   simPlaybackSpeedLabel: document.getElementById("simPlaybackSpeedLabel"),
   simClock: document.getElementById("simClock"),
   simPhaseText: document.getElementById("simPhaseText"),
+  simCutterLive: document.getElementById("simCutterLive"),
+  simCutterLiveTotal: document.getElementById("simCutterLiveTotal"),
 };
 
 function getProp(feature, names) {
@@ -1015,7 +1020,9 @@ function renderMap() {
   clearElement(els.cableLayer);
   clearElement(els.tractorLayer);
   clearElement(els.postLayer);
+  clearElement(els.cutterLayer);
   clearElement(els.labelLayer);
+  state.simulation.cutterFrameKey = "__reset__";
 
   renderPolygonCollection(els.lakeLayer, state.data.lakes, "lake-shape");
   renderNetworkLines(els.cableLayer, state.data.cable, "cable-line");
@@ -1174,6 +1181,106 @@ function buildSimulationLoads(results) {
   );
 }
 
+function buildSimulationCutterBlocks(cutterPlan) {
+  const blocks = new Map();
+  for (const entry of cutterPlan?.entries || []) {
+    if (entry.workMinutes <= 0) continue;
+    if (!blocks.has(entry.block.id)) {
+      blocks.set(entry.block.id, {
+        id: entry.block.id,
+        label: entry.block.label,
+        point: entry.block.center,
+        index: entry.index,
+        entries: [],
+      });
+    }
+    blocks.get(entry.block.id).entries.push({
+      flowerLabel: entry.flower.label,
+      initialCutters: entry.initialCutters,
+      transfers: entry.transfers,
+      finishWorkMinutes: entry.finishWorkMinutes,
+    });
+  }
+  return [...blocks.values()].sort((a, b) => a.index - b.index);
+}
+
+function cutterBlocksAt(workTime) {
+  return state.simulation.cutterBlocks.map((block) => {
+    let count = 0;
+    let allFinished = true;
+    for (const entry of block.entries) {
+      const finished = workTime >= entry.finishWorkMinutes - 1e-6;
+      if (finished) continue;
+      allFinished = false;
+      count += entry.initialCutters;
+      for (const transfer of entry.transfers) {
+        if (transfer.workMinutes <= workTime + 1e-6) count += transfer.added;
+      }
+    }
+    return {
+      ...block,
+      count,
+      status: count > 0 ? "active" : (allFinished ? "finished" : "waiting"),
+      flowers: [...new Set(block.entries.map((entry) => entry.flowerLabel))].join(", "),
+    };
+  });
+}
+
+function renderCutterFrame(workTime) {
+  const blocks = cutterBlocksAt(workTime);
+  const frameKey = blocks.map((block) => `${block.id}:${block.count}:${block.status}`).join("|");
+  if (frameKey === state.simulation.cutterFrameKey) return blocks;
+  state.simulation.cutterFrameKey = frameKey;
+  clearElement(els.cutterLayer);
+  clearElement(els.simCutterLive);
+
+  let activeCutters = 0;
+  let activeBlocks = 0;
+  for (const block of blocks) {
+    activeCutters += block.count;
+    if (block.count > 0) activeBlocks += 1;
+
+    const label = makeSvg("text", {
+      x: block.point[0],
+      y: -block.point[1] + 14,
+      class: `cutter-count-label ${block.status}`,
+      "text-anchor": "middle",
+      "dominant-baseline": "central",
+    });
+    label.textContent = `C:${block.count}`;
+    const title = makeSvg("title");
+    title.textContent = `${block.label}: ${block.count} cortadores (${block.status === "active" ? "activo" : block.status === "waiting" ? "pendiente" : "finalizado"})`;
+    label.appendChild(title);
+    els.cutterLayer?.appendChild(label);
+
+    if (els.simCutterLive) {
+      const row = document.createElement("div");
+      row.className = `cutter-live-row ${block.status}`;
+      const blockName = document.createElement("span");
+      blockName.textContent = block.label;
+      const flowers = document.createElement("span");
+      flowers.textContent = block.flowers;
+      const count = document.createElement("strong");
+      count.textContent = String(block.count);
+      const status = document.createElement("small");
+      status.textContent = block.status === "active" ? "Activo" : block.status === "waiting" ? "Pendiente" : "Finalizado";
+      row.append(blockName, flowers, count, status);
+      els.simCutterLive.appendChild(row);
+    }
+  }
+
+  if (!blocks.length && els.simCutterLive) {
+    const empty = document.createElement("div");
+    empty.className = "cutter-live-empty";
+    empty.textContent = "Sin plan calculado.";
+    els.simCutterLive.appendChild(empty);
+  }
+  if (els.simCutterLiveTotal) {
+    els.simCutterLiveTotal.textContent = blocks.length ? `${activeCutters} en ${activeBlocks} bloques` : "0 activos";
+  }
+  return blocks;
+}
+
 function simulationFrameForVehicle(vehicle, timeMinutes) {
   if (!vehicle.timeline.length) return { point: null, phase: "Sin viaje", loadState: "idle" };
   const segment = vehicle.timeline.find((item) => timeMinutes <= item.end) || vehicle.timeline[vehicle.timeline.length - 1];
@@ -1192,6 +1299,7 @@ function formatSimulationClock(value) {
 
 function updatePlaybackUi() {
   const sim = state.simulation;
+  const hasPlayback = sim.vehicles.length > 0 || sim.cutterBlocks.length > 0;
   if (els.simPlaybackSpeed) {
     sim.speedMultiplier = Math.max(1, Math.min(100, Number(els.simPlaybackSpeed.value) || 10));
     els.simPlaybackSpeed.value = String(sim.speedMultiplier);
@@ -1200,18 +1308,23 @@ function updatePlaybackUi() {
   if (els.simClock) els.simClock.textContent = formatSimulationClock(sim.timeMinutes);
   if (els.simPlayButton) {
     els.simPlayButton.textContent = sim.running ? "Pausar" : "Reproducir";
-    els.simPlayButton.disabled = sim.vehicles.length === 0;
+    els.simPlayButton.disabled = !hasPlayback;
   }
-  if (els.simResetButton) els.simResetButton.disabled = sim.vehicles.length === 0;
+  if (els.simResetButton) els.simResetButton.disabled = !hasPlayback;
   if (els.simPhaseText) {
-    if (!sim.vehicles.length) {
+    if (!hasPlayback) {
       els.simPhaseText.textContent = "Calcula un viaje para reproducirlo.";
     } else {
-      const active = sim.vehicles
+      const activeVehicles = sim.vehicles
         .map((vehicle) => `${vehicle.label}: ${simulationFrameForVehicle(vehicle, sim.timeMinutes).phase}`)
         .slice(0, 3)
         .join(" | ");
-      els.simPhaseText.textContent = sim.vehicles.length > 3 ? `${active} | ...` : active;
+      const cutterStates = cutterBlocksAt(wallToWorkMinutes(sim.timeMinutes));
+      const activeCutters = cutterStates.reduce((sum, block) => sum + block.count, 0);
+      const activeBlocks = cutterStates.filter((block) => block.count > 0).length;
+      const cutterSummary = cutterStates.length ? `Corte: ${activeCutters} cortadores en ${activeBlocks} bloques` : "";
+      const vehicleSummary = sim.vehicles.length > 3 ? `${activeVehicles} | ...` : activeVehicles;
+      els.simPhaseText.textContent = [vehicleSummary, cutterSummary].filter(Boolean).join(" | ");
     }
   }
 }
@@ -1221,6 +1334,7 @@ function renderSimulationFrame() {
     clearElement(els.simulationLayer);
     const time = state.simulation.timeMinutes;
     const workTime = wallToWorkMinutes(time);
+    renderCutterFrame(workTime);
     for (const load of state.simulation.loads) {
       if (time < load.start || time > load.end) continue;
       const fillWindow = Math.max(0.0001, load.workReady - load.workStart);
@@ -1289,18 +1403,23 @@ function clearSimulationPlayback() {
   pauseSimulationPlayback();
   state.simulation.vehicles = [];
   state.simulation.loads = [];
+  state.simulation.cutterBlocks = [];
+  state.simulation.cutterFrameKey = "__reset__";
   state.simulation.durationMinutes = 0;
   state.simulation.timeMinutes = 0;
   renderSimulationFrame();
 }
 
-function prepareSimulationPlayback(results) {
+function prepareSimulationPlayback(results, cutterPlan) {
   pauseSimulationPlayback();
   state.simulation.vehicles = buildSimulationVehicles(results);
   state.simulation.loads = buildSimulationLoads(results);
+  state.simulation.cutterBlocks = buildSimulationCutterBlocks(cutterPlan);
+  state.simulation.cutterFrameKey = "__reset__";
   const vehicleDuration = state.simulation.vehicles.reduce((max, vehicle) => Math.max(max, vehicle.totalMinutes), 0);
   const loadDuration = state.simulation.loads.reduce((max, load) => Math.max(max, load.end || 0), 0);
-  state.simulation.durationMinutes = Math.max(vehicleDuration, loadDuration);
+  const cutterDuration = workToWallEnd(cutterPlan?.finishWorkMinutes || 0);
+  state.simulation.durationMinutes = Math.max(vehicleDuration, loadDuration, cutterDuration);
   state.simulation.timeMinutes = 0;
   renderSimulationFrame();
 }
@@ -1326,7 +1445,7 @@ function stepSimulationPlayback(timestamp) {
 
 function toggleSimulationPlayback() {
   const sim = state.simulation;
-  if (!sim.vehicles.length) return;
+  if (!sim.vehicles.length && !sim.cutterBlocks.length) return;
   if (sim.running) {
     pauseSimulationPlayback();
     return;
@@ -2404,6 +2523,7 @@ function calculateSimulation() {
     }
   }
 
+  const cutterPlan = buildCutterWorkforcePlan(planRows, demandByFlower, weeklyHours);
   const displayRoutes = [];
   const routeKeys = new Set();
   for (const route of results.flatMap((result) => result.routes)) {
@@ -2417,7 +2537,7 @@ function calculateSimulation() {
   state.selected.origin = planRows[0]?.block || null;
   state.selected.destination = planRows[planRows.length - 1]?.post || null;
   renderRoute();
-  prepareSimulationPlayback(results);
+  prepareSimulationPlayback(results, cutterPlan);
   updateSelectionStyles();
 
   const selectedFlowerKeys = new Set(planRows.map((row) => row.flowerKey));
@@ -2431,7 +2551,6 @@ function calculateSimulation() {
   const dailyHours = weeklyHours / WORK_DAYS_PER_WEEK;
   const hourlyDemand = dailyHours > 0 ? dailyDemand / dailyHours : 0;
   const bucketsNeeded = Math.ceil(dailyDemand / bucketStems);
-  const cutterPlan = buildCutterWorkforcePlan(planRows, demandByFlower, weeklyHours);
   const destinationLabels = [...new Set(planRows.map((row) => row.post.label))].join(", ");
   const totalPlanMinutes = results.reduce((max, result) => Math.max(max, result.dayWallMinutes || result.totalMinutes), 0);
   const totalTrips = results[0]?.tripsNeeded || 0;

@@ -53,6 +53,8 @@ const FLOWER_CONFIGS = {
 const BLOCK_MINUTES = 5;
 const POST_MINUTES = 5;
 const WORK_DAYS_PER_WEEK = 6;
+const GARRUCHERO_STEMS_PER_HOUR = 2500;
+const MAX_GARRUCHEROS_PER_BLOCK = 2;
 const WORK_START_MINUTES = 6 * 60 + 15;
 const BREAK_START_CLOCK_MINUTES = 11 * 60;
 const BREAK_DURATION_MINUTES = 45;
@@ -384,6 +386,62 @@ function extractLineStrings(geometry) {
   return [];
 }
 
+function pointOnSegmentWithin(point, a, b, tolerance = 0.05) {
+  const projection = projectPointToSegment(point, a, b);
+  return distance(point, projection.point) <= tolerance;
+}
+
+function pointInRing(point, ring) {
+  if (!ring?.length) return false;
+  let inside = false;
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
+    const a = ring[previous];
+    const b = ring[index];
+    if (pointOnSegmentWithin(point, a, b)) return true;
+    const crossesRay =
+      (a[1] > point[1]) !== (b[1] > point[1])
+      && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0];
+    if (crossesRay) inside = !inside;
+  }
+  return inside;
+}
+
+function pointInPolygonCoordinates(point, rings) {
+  if (!rings?.length || !pointInRing(point, rings[0])) return false;
+  return !rings.slice(1).some((ring) => pointInRing(point, ring));
+}
+
+function segmentIntersectsPolygonCoordinates(a, b, rings) {
+  if (!rings?.length) return false;
+  if (pointInPolygonCoordinates(a, rings) || pointInPolygonCoordinates(b, rings)) return true;
+  for (const ring of rings) {
+    for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index, index += 1) {
+      if (segmentIntersection(a, b, ring[previous], ring[index])) return true;
+    }
+  }
+  return false;
+}
+
+function segmentIntersectsGeometry(a, b, geometry) {
+  if (!geometry) return false;
+  if (geometry.type === "Polygon") return segmentIntersectsPolygonCoordinates(a, b, cleanRings(geometry.coordinates));
+  if (geometry.type === "MultiPolygon") {
+    return geometry.coordinates.some((polygon) => segmentIntersectsPolygonCoordinates(a, b, cleanRings(polygon)));
+  }
+  if (geometry.type === "GeometryCollection") {
+    return geometry.geometries.some((child) => segmentIntersectsGeometry(a, b, child));
+  }
+  return false;
+}
+
+function blockIdsIntersectingSegment(a, b) {
+  const blockIds = [];
+  for (const block of state.blocks) {
+    if (block.features.some((feature) => segmentIntersectsGeometry(a, b, feature.geometry))) blockIds.push(block.id);
+  }
+  return blockIds;
+}
+
 function prepareBlocks(featureCollection) {
   const groups = new Map();
   const features = featureCollection.features || [];
@@ -470,6 +528,7 @@ function buildRouteNetwork(featureCollection, config = NETWORK_CONFIGS.cable) {
           b,
           weight,
           accessRule,
+          transitBlockIds: config.key === "cable" ? blockIdsIntersectingSegment(a, b) : [],
           splits: [
             { t: 0, point: a },
             { t: 1, point: b },
@@ -593,7 +652,7 @@ function graphFromSegments(segments, config = NETWORK_CONFIGS.cable) {
   function addEdge(from, to, weight, points, segment) {
     if (from === to || weight <= 0) return;
     const resourceKey = edgeResourceKey(from, to);
-    const edgeData = { sourceSegment: segment.id, accessRule: segment.accessRule, resourceKey };
+    const edgeData = { sourceSegment: segment.id, accessRule: segment.accessRule, resourceKey, transitBlockIds: segment.transitBlockIds || [] };
     const forward = { from, to, weight, points, ...edgeData };
     const backward = { from: to, to: from, weight, points: [...points].reverse(), ...edgeData };
     adjacency[from].push(forward);
@@ -666,7 +725,8 @@ function routeAttachmentsForEntity(entity, network, role) {
   return isBlock46(entity) || requiredRule ? attachments : attachments.slice(0, 1);
 }
 
-function routeAllowsEdge(network, edge, origin, destination) {
+function routeAllowsEdge(network, edge, origin, destination, blockedBlockIds = null) {
+  if (blockedBlockIds?.size && (edge.transitBlockIds || []).some((blockId) => blockedBlockIds.has(blockId))) return false;
   if (!network.config.postAccessRules || !edge.accessRule) return true;
   if (edge.accessRule === `exit:${origin.type === "post" ? origin.id : ""}`) return true;
   return edge.accessRule === `entry:${destination.type === "post" ? destination.id : ""}`;
@@ -682,8 +742,9 @@ function projectPointToSegment(point, a, b) {
   return { point: pointOnLine(a, b, t), t };
 }
 
-function calculateRoute(origin, destination, speed) {
+function calculateRoute(origin, destination, speed, options = {}) {
   const network = activeNetwork();
+  const blockedBlockIds = new Set(options.blockedBlockIds || []);
   const startAttachments = routeAttachmentsForEntity(origin, network, "origin");
   const endAttachments = routeAttachmentsForEntity(destination, network, "destination");
   if (!startAttachments.length || !endAttachments.length) throw new Error(`La red de ${network.config.routeName} no tiene tramos validos.`);
@@ -703,13 +764,14 @@ function calculateRoute(origin, destination, speed) {
 
   let result = null;
   for (const attempt of attempts) {
-    result = routeBetweenAttachments(network, attempt.startAttach, attempt.endAttach, origin, destination);
+    result = routeBetweenAttachments(network, attempt.startAttach, attempt.endAttach, origin, destination, blockedBlockIds);
     if (result) break;
   }
   if (!result) throw new Error(`No se encontro una ruta conectada sobre la red de ${network.config.routeName}.`);
 
   const cableCoords = mergeLineParts(result.parts);
   const segments = routeOccupations(result.traversals, speed);
+  const blockPassages = routeBlockPassages(result.traversals, speed, origin, destination);
 
   return {
     origin,
@@ -721,6 +783,8 @@ function calculateRoute(origin, destination, speed) {
     timeMinutes: result.distance / speed,
     cableCoords,
     segments,
+    blockPassages,
+    avoidedBlockIds: [...blockedBlockIds],
   };
 }
 
@@ -748,7 +812,35 @@ function routeOccupations(traversals, speed) {
   return occupations;
 }
 
-function routeBetweenAttachments(network, startAttach, endAttach, origin, destination) {
+function routeBlockPassages(traversals, speed, origin, destination) {
+  const excludedBlocks = new Set([
+    origin?.type === "block" ? origin.id : null,
+    destination?.type === "block" ? destination.id : null,
+  ].filter(Boolean));
+  const byBlock = new Map();
+  let elapsed = 0;
+  for (const traversal of traversals) {
+    const duration = traversal.weight / speed;
+    for (const blockId of traversal.transitBlockIds || []) {
+      if (excludedBlocks.has(blockId)) continue;
+      const previous = byBlock.get(blockId);
+      if (previous) {
+        previous.offsetStartMinutes = Math.min(previous.offsetStartMinutes, elapsed);
+        previous.offsetEndMinutes = Math.max(previous.offsetEndMinutes, elapsed + duration);
+      } else {
+        byBlock.set(blockId, {
+          blockId,
+          offsetStartMinutes: elapsed,
+          offsetEndMinutes: elapsed + duration,
+        });
+      }
+    }
+    elapsed += duration;
+  }
+  return [...byBlock.values()];
+}
+
+function routeBetweenAttachments(network, startAttach, endAttach, origin, destination, blockedBlockIds = null) {
   const baseCount = network.nodes.length;
   const startId = baseCount;
   const endId = baseCount + 1;
@@ -765,6 +857,7 @@ function routeBetweenAttachments(network, startAttach, endAttach, origin, destin
       sourceSegment: sourceEdge.sourceSegment,
       accessRule: sourceEdge.accessRule,
       resourceKey: sourceEdge.resourceKey || edgeResourceKey(sourceEdge.from, sourceEdge.to),
+      transitBlockIds: sourceEdge.transitBlockIds || [],
     });
   }
 
@@ -789,10 +882,10 @@ function routeBetweenAttachments(network, startAttach, endAttach, origin, destin
     addExtra(endId, startId, directWeight, [endAttach.projection, startAttach.projection], startAttach.edge);
   }
 
-  return dijkstra(network, extraAdj, startId, endId, totalNodes, origin, destination);
+  return dijkstra(network, extraAdj, startId, endId, totalNodes, origin, destination, blockedBlockIds);
 }
 
-function dijkstra(network, extraAdj, startId, endId, totalNodes, origin, destination) {
+function dijkstra(network, extraAdj, startId, endId, totalNodes, origin, destination, blockedBlockIds = null) {
   const dist = Array(totalNodes).fill(Infinity);
   const prev = Array(totalNodes).fill(null);
   const prevEdge = Array(totalNodes).fill(null);
@@ -807,7 +900,7 @@ function dijkstra(network, extraAdj, startId, endId, totalNodes, origin, destina
     const baseEdges = network.adjacency[node] || [];
     const extraEdges = extraAdj.get(node) || [];
     for (const edge of [...baseEdges, ...extraEdges]) {
-      if (!routeAllowsEdge(network, edge, origin, destination)) continue;
+      if (!routeAllowsEdge(network, edge, origin, destination, blockedBlockIds)) continue;
       const next = edge.to;
       const nextDist = currentDist + edge.weight;
       if (nextDist < dist[next]) {
@@ -831,6 +924,7 @@ function dijkstra(network, extraAdj, startId, endId, totalNodes, origin, destina
       sourceSegment: edge.sourceSegment,
       accessRule: edge.accessRule || null,
       weight: edge.weight,
+      transitBlockIds: edge.transitBlockIds || [],
     });
   }
   return { distance: dist[endId], parts, traversals };
@@ -1812,11 +1906,11 @@ function buildCutterWorkforcePlan(planRows, demandByFlower, weeklyHours) {
   };
 }
 
-function routeForNetwork(origin, destination, speed, networkType) {
+function routeForNetwork(origin, destination, speed, networkType, blockedBlockIds = []) {
   const previousNetworkType = state.networkType;
   state.networkType = networkType;
   try {
-    return calculateRoute(origin, destination, speed);
+    return calculateRoute(origin, destination, speed, { blockedBlockIds });
   } finally {
     state.networkType = previousNetworkType;
   }
@@ -1943,8 +2037,9 @@ function addTimelineSegment(timeline, segment) {
   });
 }
 
-function routeCacheKey(origin, destination, networkType) {
-  return `${networkType}:${origin.type}:${origin.id}->${destination.type}:${destination.id}`;
+function routeCacheKey(origin, destination, networkType, blockedBlockIds = []) {
+  const blockedKey = [...blockedBlockIds].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true })).join(",");
+  return `${networkType}:${origin.type}:${origin.id}->${destination.type}:${destination.id}:avoid=${blockedKey}`;
 }
 
 function intervalsOverlap(start, end, booking) {
@@ -1956,7 +2051,7 @@ function nextRouteStart(route, earliestStart, reservations) {
   let start = Math.max(0, earliestStart);
   for (let guard = 0; guard < 1000; guard += 1) {
     let shifted = false;
-    for (const occupation of route.segments) {
+    for (const occupation of route.segments || []) {
       const bookings = reservations.get(occupation.resourceKey) || [];
       const intervalStart = start + occupation.offsetStartMinutes;
       const intervalEnd = start + occupation.offsetEndMinutes;
@@ -1969,13 +2064,15 @@ function nextRouteStart(route, earliestStart, reservations) {
       if (shifted) break;
     }
     if (!shifted) return start;
+    if (!Number.isFinite(start)) return Infinity;
   }
-  return start;
+  return Infinity;
 }
 
-function reserveRoute(route, start, reservations, label) {
-  if (!reservations || !route?.segments?.length) return;
-  for (const occupation of route.segments) {
+function reserveRoute(route, start, reservations, label, blockPassageReservations = null) {
+  if (!Number.isFinite(start)) return;
+  for (const occupation of route?.segments || []) {
+    if (!reservations) break;
     const list = reservations.get(occupation.resourceKey) || [];
     list.push({
       start: start + occupation.offsetStartMinutes,
@@ -1985,6 +2082,37 @@ function reserveRoute(route, start, reservations, label) {
     list.sort((a, b) => a.start - b.start);
     reservations.set(occupation.resourceKey, list);
   }
+  for (const passage of route?.blockPassages || []) {
+    if (!blockPassageReservations) break;
+    const list = blockPassageReservations.get(passage.blockId) || [];
+    list.push({
+      start: start + passage.offsetStartMinutes,
+      end: start + passage.offsetEndMinutes,
+      label,
+    });
+    list.sort((a, b) => a.start - b.start);
+    blockPassageReservations.set(passage.blockId, list);
+  }
+}
+
+function nextBlockOccupancyStart(blockId, earliestStart, passageReservations) {
+  if (!passageReservations) return earliestStart;
+  let start = Math.max(0, earliestStart);
+  const bookings = passageReservations.get(blockId) || [];
+  for (const booking of bookings) {
+    if (booking.end > start) start = booking.end;
+  }
+  return start;
+}
+
+function reserveBlockOccupancy(blockId, start, reservations, label) {
+  if (!reservations || !Number.isFinite(start)) return null;
+  const booking = { start, end: Infinity, label };
+  const list = reservations.get(blockId) || [];
+  list.push(booking);
+  list.sort((a, b) => a.start - b.start);
+  reservations.set(blockId, list);
+  return booking;
 }
 
 function nextBlockStart(blockId, earliestStart, duration, reservations) {
@@ -2020,9 +2148,11 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
   let plannedTravelMinutes = 0;
   let plannedServiceMinutes = 0;
 
-  function cachedRoute(origin, destination) {
-    const key = routeCacheKey(origin, destination, input.networkType);
-    if (!routeCache.has(key)) routeCache.set(key, routeForNetwork(origin, destination, input.speed, input.networkType));
+  function cachedRoute(origin, destination, blockedBlockIds = []) {
+    const key = routeCacheKey(origin, destination, input.networkType, blockedBlockIds);
+    if (!routeCache.has(key)) {
+      routeCache.set(key, routeForNetwork(origin, destination, input.speed, input.networkType, blockedBlockIds));
+    }
     return routeCache.get(key);
   }
 
@@ -2031,6 +2161,14 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
     const dailyWorkHours = dailyWorkMinutes / 60;
     const cuttersNeeded = dailyWorkHours > 0 && row.flower.cutterRate > 0 ? (blockDemand / dailyWorkHours) / row.flower.cutterRate : 0;
     const productionPerMinute = cuttersNeeded * row.flower.cutterRate / 60;
+    const garrucheroEquivalent = input.networkType === "cable" && dailyWorkHours > 0
+      ? blockDemand / (GARRUCHERO_STEMS_PER_HOUR * dailyWorkHours)
+      : 0;
+    const blockOperatorsNeeded = input.networkType === "cable" && blockDemand > 0
+      ? Math.min(MAX_GARRUCHEROS_PER_BLOCK, Math.max(1, Math.ceil(garrucheroEquivalent - 1e-9)))
+      : 0;
+    const operatorBlockCapacity = blockOperatorsNeeded * GARRUCHERO_STEMS_PER_HOUR * dailyWorkHours;
+    const operatorCapacityShortfall = Math.max(0, blockDemand - operatorBlockCapacity);
     const tripsNeeded = input.stemsPerTrip > 0 ? Math.ceil(blockDemand / input.stemsPerTrip) : 0;
     const loadedRoute = cachedRoute(row.block, row.post);
     const loadedMinutes = loadedRoute.cableDistance / input.speed;
@@ -2048,6 +2186,10 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
       distance: 0,
       minutes: 0,
       cuttersNeeded,
+      garrucheroEquivalent,
+      blockOperatorsNeeded,
+      operatorBlockCapacity,
+      operatorCapacityShortfall,
       productionPerMinute,
       productionPerHour: cuttersNeeded * row.flower.cutterRate,
       cutWaitMinutes: 0,
@@ -2075,19 +2217,34 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
     jobs.push(job);
   }
 
+  const cableOperatorAssignments = input.networkType === "cable"
+    ? jobs.flatMap((job) => Array.from({ length: job.blockOperatorsNeeded }, () => job))
+    : [];
+  const cableRequiredOperators = cableOperatorAssignments.length;
+  const cableEquivalentOperators = jobs.reduce((sum, job) => sum + job.garrucheroEquivalent, 0);
+  const cableCapacityShortfall = jobs.reduce((sum, job) => sum + job.operatorCapacityShortfall, 0);
+
   function scheduleWith(operatorCount, keepTimeline = false, cutterMultiplier = 1) {
     const startPost = planRows[0]?.post;
     const resourceReservations = input.networkType === "cable" ? new Map() : null;
+    const blockOccupancyReservations = input.networkType === "cable" ? new Map() : null;
+    const blockPassageReservations = input.networkType === "cable" ? new Map() : null;
     const blockReservations = new Map();
     const loadTimelines = [];
+    const usedRoutes = [];
     const jobWaits = new Map(jobs.map((job) => [job, 0]));
-    const operators = Array.from({ length: operatorCount }, (_, index) => ({
+    const assignedJobs = input.networkType === "cable"
+      ? cableOperatorAssignments.slice(0, operatorCount)
+      : Array.from({ length: operatorCount }, () => null);
+    const operators = assignedJobs.map((assignedJob, index) => ({
       index,
       time: 0,
-      currentPost: startPost,
+      currentPost: assignedJob?.post || startPost,
+      assignedJob,
       timeline: [],
       busyMinutes: 0,
       distance: 0,
+      loadedDistance: 0,
       trips: 0,
     }));
     const blockStates = jobs
@@ -2100,6 +2257,7 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
         remainingTrips: job.tripsNeeded,
         currentLoadStart: null,
         currentLoadReady: null,
+        blockOccupancyBooking: null,
       }));
 
     function fillMinutes(state, tripIndex) {
@@ -2123,16 +2281,62 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
       });
     }
 
+    function occupiedBlockConflicts(route, routeStart) {
+      const conflicts = new Set();
+      if (!blockOccupancyReservations) return conflicts;
+      for (const passage of route?.blockPassages || []) {
+        const passageStart = routeStart + passage.offsetStartMinutes;
+        const passageEnd = routeStart + passage.offsetEndMinutes;
+        const bookings = blockOccupancyReservations.get(passage.blockId) || [];
+        if (bookings.some((booking) => intervalsOverlap(passageStart, passageEnd, booking))) {
+          conflicts.add(passage.blockId);
+        }
+      }
+      return conflicts;
+    }
+
+    function carryingRouteCandidate(origin, destination, earliestStart) {
+      if (input.networkType !== "cable") {
+        const route = cachedRoute(origin, destination);
+        const start = nextRouteStart(route, earliestStart, resourceReservations);
+        return Number.isFinite(start) ? { route, start } : null;
+      }
+
+      const blockedBlockIds = new Set();
+      for (let guard = 0; guard < blockStates.length + 5; guard += 1) {
+        let route;
+        try {
+          route = cachedRoute(origin, destination, [...blockedBlockIds]);
+        } catch {
+          return null;
+        }
+        const start = nextRouteStart(route, earliestStart, resourceReservations);
+        if (!Number.isFinite(start)) return null;
+        const conflicts = occupiedBlockConflicts(route, start);
+        const newConflicts = [...conflicts].filter((blockId) => !blockedBlockIds.has(blockId));
+        if (!newConflicts.length) return { route, start };
+        for (const blockId of newConflicts) blockedBlockIds.add(blockId);
+      }
+      return null;
+    }
+
     function setupCandidate(operator, state) {
-      const emptyRoute = cachedRoute(operator.currentPost, state.row.block);
-      const emptyStart = nextRouteStart(emptyRoute, operator.time, resourceReservations);
+      const movement = carryingRouteCandidate(operator.currentPost, state.row.block, operator.time);
+      if (!movement) return { finish: Infinity, score: Infinity };
+      const emptyRoute = movement.route;
+      const emptyStart = movement.start;
       const emptyEnd = emptyStart + emptyRoute.timeMinutes;
-      const blockStart = nextBlockStart(state.row.block.id, emptyEnd, BLOCK_MINUTES, blockReservations);
+      let blockStart = nextBlockStart(state.row.block.id, emptyEnd, BLOCK_MINUTES, blockReservations);
+      blockStart = nextBlockOccupancyStart(state.row.block.id, blockStart, blockPassageReservations);
+      blockStart = nextBlockStart(state.row.block.id, blockStart, BLOCK_MINUTES, blockReservations);
       const blockEnd = blockStart + BLOCK_MINUTES;
       const soloRoute = cachedRoute(state.row.block, state.row.post);
       const soloStart = blockEnd;
       const soloEnd = soloStart + soloRoute.timeMinutes;
       const wait = Math.max(0, emptyStart - operator.time) + Math.max(0, blockStart - emptyEnd);
+      const setupPriority = input.networkType === "cable"
+        ? -(emptyRoute.blockPassages?.length || 0) * 100000 - emptyRoute.timeMinutes * 100
+        : soloEnd;
       return {
         type: "setup",
         operator,
@@ -2147,19 +2351,24 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
         soloEnd,
         wait,
         finish: soloEnd,
-        score: soloEnd + wait * 0.35,
+        score: setupPriority + wait * 0.35,
       };
     }
 
     function pickupCandidate(operator, state) {
-      const emptyRoute = cachedRoute(operator.currentPost, state.row.block);
-      const emptyStart = nextRouteStart(emptyRoute, operator.time, resourceReservations);
+      const emptyMovement = carryingRouteCandidate(operator.currentPost, state.row.block, operator.time);
+      if (!emptyMovement) return { finish: Infinity, score: Infinity };
+      const emptyRoute = emptyMovement.route;
+      const emptyStart = emptyMovement.start;
       const emptyEnd = emptyStart + emptyRoute.timeMinutes;
       const readyStart = Math.max(emptyEnd, state.currentLoadReady || 0);
       const blockStart = nextBlockStart(state.row.block.id, readyStart, BLOCK_MINUTES, blockReservations);
       const blockEnd = blockStart + BLOCK_MINUTES;
-      const loadedStart = nextRouteStart(state.job.loadedRoute, blockEnd, resourceReservations);
-      const loadedEnd = loadedStart + state.job.loadedRoute.timeMinutes;
+      const loadedMovement = carryingRouteCandidate(state.row.block, state.row.post, blockEnd);
+      if (!loadedMovement) return { finish: Infinity, score: Infinity };
+      const loadedRoute = loadedMovement.route;
+      const loadedStart = loadedMovement.start;
+      const loadedEnd = loadedStart + loadedRoute.timeMinutes;
       const finish = loadedEnd + POST_MINUTES;
       const wait =
         Math.max(0, emptyStart - operator.time)
@@ -2170,6 +2379,7 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
         operator,
         state,
         emptyRoute,
+        loadedRoute,
         emptyStart,
         emptyEnd,
         blockStart,
@@ -2184,12 +2394,16 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
 
     function addTravel(timeline, route, start, end, label, loadState) {
       if (!keepTimeline || !route.cableCoords?.length || end <= start) return;
+      const detourBlocks = route.avoidedBlockIds || [];
+      const detourLabel = detourBlocks.length
+        ? label + " (desvio por bloques " + detourBlocks.join(", ") + ")"
+        : label;
       addTimelineSegment(timeline, {
         type: "travel",
         workStart: start,
         workEnd: end,
         points: route.cableCoords,
-        label,
+        label: detourLabel,
         loadState,
       });
     }
@@ -2210,16 +2424,19 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
     while (blockStates.some((state) => !state.seeded || state.remainingTrips > 0) && guard < 10000) {
       guard += 1;
       let best = null;
+      const prioritizeSetup = input.networkType === "cable" && blockStates.some((state) =>
+        !state.seeded && operators.some((operator) => !operator.assignedJob || operator.assignedJob === state.job));
       for (const operator of operators) {
         for (const state of blockStates) {
+          if (operator.assignedJob && operator.assignedJob !== state.job) continue;
           if (!state.seeded) {
             const candidate = setupCandidate(operator, state);
-            if (!best || candidate.score < best.score) best = candidate;
+            if (Number.isFinite(candidate.finish) && (!best || candidate.score < best.score)) best = candidate;
             continue;
           }
-          if (state.remainingTrips <= 0) continue;
+          if (prioritizeSetup || state.remainingTrips <= 0) continue;
           const candidate = pickupCandidate(operator, state);
-          if (!best || candidate.score < best.score) best = candidate;
+          if (Number.isFinite(candidate.finish) && (!best || candidate.score < best.score)) best = candidate;
         }
       }
       if (!best) break;
@@ -2227,13 +2444,20 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
       const { operator, state } = best;
       const taskStart = operator.time;
       if (best.type === "setup") {
-        reserveRoute(best.emptyRoute, best.emptyStart, resourceReservations, `vacia a ${state.row.block.label}`);
+        reserveRoute(best.emptyRoute, best.emptyStart, resourceReservations, `vacia a ${state.row.block.label}`, blockPassageReservations);
         reserveBlock(state.row.block.id, best.blockStart, best.blockEnd, blockReservations, `deja vacia ${state.row.block.label}`);
-        addWait(operator.timeline, taskStart, best.emptyStart, operator.currentPost?.center || state.row.post.center, "Espera tramo libre para salir", "idle");
+        state.blockOccupancyBooking = reserveBlockOccupancy(
+          state.row.block.id,
+          best.blockStart,
+          blockOccupancyReservations,
+          `${input.loadSetLabel} cargando en ${state.row.block.label}`,
+        );
+        addWait(operator.timeline, taskStart, best.emptyStart, operator.currentPost?.center || state.row.post.center, "Espera tramo de cable via libre para salir", "idle");
         addTravel(operator.timeline, best.emptyRoute, best.emptyStart, best.emptyEnd, `${input.operatorSingularLabel} ${operator.index + 1}: lleva ${input.loadSetLabel} vacia a ${state.row.block.label}`, "empty");
         addWait(operator.timeline, best.emptyEnd, best.blockStart, best.emptyRoute.cableCoords?.[best.emptyRoute.cableCoords.length - 1] || state.row.block.center, `Espera entrada libre en ${state.row.block.label}`, "idle");
         addWait(operator.timeline, best.blockStart, best.blockEnd, state.job.loadedRoute.cableCoords?.[0] || state.row.block.center, `Deja ${input.loadSetLabel} vacia en ${state.row.block.label}`, "swap");
         addTravel(operator.timeline, best.soloRoute, best.soloStart, best.soloEnd, `${input.operatorSingularLabel} ${operator.index + 1}: regresa sin ${input.loadSetLabel} a ${state.row.post.label}`, "solo");
+        usedRoutes.push(best.emptyRoute, best.soloRoute);
         state.seeded = true;
         state.currentLoadStart = best.blockEnd;
         state.currentLoadReady = best.blockEnd + fillMinutes(state, state.nextTripIndex);
@@ -2242,17 +2466,18 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
         operator.busyMinutes += best.finish - taskStart;
         operator.distance += best.emptyRoute.cableDistance + best.soloRoute.cableDistance;
       } else {
-        reserveRoute(best.emptyRoute, best.emptyStart, resourceReservations, `vacia a ${state.row.block.label}`);
+        reserveRoute(best.emptyRoute, best.emptyStart, resourceReservations, `vacia a ${state.row.block.label}`, blockPassageReservations);
         reserveBlock(state.row.block.id, best.blockStart, best.blockEnd, blockReservations, `intercambio ${state.row.block.label}`);
-        reserveRoute(state.job.loadedRoute, best.loadedStart, resourceReservations, `llena a ${state.row.post.label}`);
+        reserveRoute(best.loadedRoute, best.loadedStart, resourceReservations, `llena a ${state.row.post.label}`, blockPassageReservations);
+        usedRoutes.push(best.emptyRoute, best.loadedRoute);
         pushLoadTimeline(state, best.blockStart);
-        addWait(operator.timeline, taskStart, best.emptyStart, operator.currentPost?.center || state.row.post.center, "Espera tramo libre para salir", "idle");
+        addWait(operator.timeline, taskStart, best.emptyStart, operator.currentPost?.center || state.row.post.center, "Espera tramo de cable via libre para salir", "idle");
         addTravel(operator.timeline, best.emptyRoute, best.emptyStart, best.emptyEnd, `${input.operatorSingularLabel} ${operator.index + 1}: lleva ${input.loadSetLabel} vacia a ${state.row.block.label}`, "empty");
         addWait(operator.timeline, best.emptyEnd, best.blockStart, best.emptyRoute.cableCoords?.[best.emptyRoute.cableCoords.length - 1] || state.row.block.center, `Espera ${input.loadSetLabel} llena o entrada libre en ${state.row.block.label}`, "idle");
         addWait(operator.timeline, best.blockStart, best.blockEnd, state.job.loadedRoute.cableCoords?.[0] || state.row.block.center, `Saca llena, deja vacia y despeja ${state.row.block.label}`, "swap");
-        addWait(operator.timeline, best.blockEnd, best.loadedStart, state.job.loadedRoute.cableCoords?.[0] || state.row.block.center, "Espera tramo libre con carga al lado", "idle");
-        addTravel(operator.timeline, state.job.loadedRoute, best.loadedStart, best.loadedEnd, `${input.operatorSingularLabel} ${operator.index + 1}: lleva ${input.loadSetLabel} llena a ${state.row.post.label}`, "loaded");
-        addWait(operator.timeline, best.loadedEnd, best.finish, state.job.loadedRoute.cableCoords?.[state.job.loadedRoute.cableCoords.length - 1] || state.row.post.center, `Descarga en ${state.row.post.label}`, "idle");
+        addWait(operator.timeline, best.blockEnd, best.loadedStart, state.job.loadedRoute.cableCoords?.[0] || state.row.block.center, "Espera tramo de cable via libre con carga al lado", "idle");
+        addTravel(operator.timeline, best.loadedRoute, best.loadedStart, best.loadedEnd, `${input.operatorSingularLabel} ${operator.index + 1}: lleva ${input.loadSetLabel} llena a ${state.row.post.label}`, "loaded");
+        addWait(operator.timeline, best.loadedEnd, best.finish, best.loadedRoute.cableCoords?.[best.loadedRoute.cableCoords.length - 1] || state.row.post.center, `Descarga en ${state.row.post.label}`, "idle");
         const wait = best.wait;
         jobWaits.set(state.job, (jobWaits.get(state.job) || 0) + wait);
         state.job.firstArrivalMinutes ??= best.emptyEnd;
@@ -2265,11 +2490,13 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
         } else {
           state.currentLoadStart = null;
           state.currentLoadReady = null;
+          if (state.blockOccupancyBooking) state.blockOccupancyBooking.end = best.blockEnd;
         }
         operator.time = best.finish;
         operator.currentPost = state.row.post;
         operator.busyMinutes += best.finish - taskStart;
-        operator.distance += best.emptyRoute.cableDistance + state.job.loadedRoute.cableDistance;
+        operator.distance += best.emptyRoute.cableDistance + best.loadedRoute.cableDistance;
+        operator.loadedDistance += best.loadedRoute.cableDistance;
         operator.trips += 1;
       }
     }
@@ -2291,51 +2518,84 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
     return {
       operators,
       loadTimelines,
+      usedRoutes,
+      totalLoadedDistance: operators.reduce((sum, operator) => sum + operator.loadedDistance, 0),
       finishWorkMinutes: operators.reduce((max, operator) => Math.max(max, operator.time), 0),
       totalBusyMinutes: operators.reduce((sum, operator) => sum + operator.busyMinutes, 0),
       waitForReadyMinutes: [...jobWaits.values()].reduce((sum, value) => sum + value, 0),
       jobWaits,
+      completed: blockStates.every((state) => state.seeded && state.remainingTrips <= 0),
+      unservedTrips: blockStates.reduce((sum, state) => sum + state.remainingTrips, 0),
     };
   }
 
   let requiredOperatorsRounded = input.units + 1;
   let requiredCutterMultiplier = 1;
   let selectedSchedule = null;
-  for (let count = 1; count <= input.units; count += 1) {
-    const instantSchedule = scheduleWith(count, false, 1000000);
-    if (instantSchedule.finishWorkMinutes > dailyWorkMinutes) continue;
+  let staffingFeasible = true;
 
+  function scheduleFitsDay(schedule) {
+    return schedule.completed && schedule.finishWorkMinutes <= dailyWorkMinutes;
+  }
+
+  function findCutterMultiplier(operatorCount) {
+    const instantSchedule = scheduleWith(operatorCount, false, 1000000);
+    if (!scheduleFitsDay(instantSchedule)) return null;
     let low = 1;
     let high = 1;
-    let highSchedule = scheduleWith(count, false, high);
-    while (highSchedule.finishWorkMinutes > dailyWorkMinutes && high < 64) {
+    let highSchedule = scheduleWith(operatorCount, false, high);
+    while (!scheduleFitsDay(highSchedule) && high < 64) {
       low = high;
       high *= 2;
-      highSchedule = scheduleWith(count, false, high);
+      highSchedule = scheduleWith(operatorCount, false, high);
     }
-    if (highSchedule.finishWorkMinutes > dailyWorkMinutes) continue;
+    if (!scheduleFitsDay(highSchedule)) return null;
     for (let iteration = 0; iteration < 28; iteration += 1) {
       const mid = (low + high) / 2;
-      const midSchedule = scheduleWith(count, false, mid);
-      if (midSchedule.finishWorkMinutes <= dailyWorkMinutes) {
+      const midSchedule = scheduleWith(operatorCount, false, mid);
+      if (scheduleFitsDay(midSchedule)) {
         high = mid;
         highSchedule = midSchedule;
       } else {
         low = mid;
       }
     }
-    requiredOperatorsRounded = count;
-    requiredCutterMultiplier = high;
-    selectedSchedule = highSchedule;
-    break;
+    return { multiplier: high, schedule: highSchedule };
   }
-  if (!selectedSchedule) selectedSchedule = scheduleWith(input.units, false, 1);
-  const feasible = requiredOperatorsRounded <= input.units;
-  const animationOperatorCount = feasible ? requiredOperatorsRounded : input.units;
-  const animationCutterMultiplier = feasible ? requiredCutterMultiplier : 1;
+
+  if (input.networkType === "cable") {
+    requiredOperatorsRounded = cableRequiredOperators;
+    staffingFeasible = cableRequiredOperators <= input.units && cableCapacityShortfall <= 1e-6;
+    const scheduledOperators = Math.min(cableRequiredOperators, input.units);
+    const optimized = staffingFeasible ? findCutterMultiplier(scheduledOperators) : null;
+    if (optimized) {
+      requiredCutterMultiplier = optimized.multiplier;
+      selectedSchedule = optimized.schedule;
+    } else {
+      selectedSchedule = scheduleWith(scheduledOperators, false, 1);
+      staffingFeasible = false;
+    }
+  } else {
+    for (let count = 1; count <= input.units; count += 1) {
+      const optimized = findCutterMultiplier(count);
+      if (!optimized) continue;
+      requiredOperatorsRounded = count;
+      requiredCutterMultiplier = optimized.multiplier;
+      selectedSchedule = optimized.schedule;
+      break;
+    }
+    if (!selectedSchedule) selectedSchedule = scheduleWith(input.units, false, 1);
+    staffingFeasible = requiredOperatorsRounded <= input.units;
+  }
+
+  const animationOperatorCount = input.networkType === "cable"
+    ? Math.min(requiredOperatorsRounded, input.units)
+    : (staffingFeasible ? requiredOperatorsRounded : input.units);
+  const animationCutterMultiplier = staffingFeasible ? requiredCutterMultiplier : 1;
   const animationSchedule = scheduleWith(animationOperatorCount, true, animationCutterMultiplier);
+  const feasible = staffingFeasible && scheduleFitsDay(animationSchedule);
   const operatorMinutesEquivalent = animationSchedule.totalBusyMinutes / dailyWorkMinutes;
-  const requiredLoadSets = Math.min(input.maxLoadSets, Math.ceil(animationOperatorCount * input.setsPerOperator));
+  const requiredLoadSets = Math.ceil(requiredOperatorsRounded * input.setsPerOperator);
   const loadSetGap = input.maxLoadSets - requiredLoadSets;
   const adjustedJobs = jobs.map((job) => ({
     ...job,
@@ -2349,8 +2609,9 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
 
   return {
     ...input,
-    routes: [...routeCache.values()].filter((route) => {
-      const key = `${route.networkType}:${route.origin?.type}:${route.origin?.id}:${route.destination?.type}:${route.destination?.id}:${input.routeColor}`;
+    routes: animationSchedule.usedRoutes.filter((route) => {
+      const avoided = (route.avoidedBlockIds || []).join(",");
+      const key = `${route.networkType}:${route.origin?.type}:${route.origin?.id}:${route.destination?.type}:${route.destination?.id}:${avoided}:${input.routeColor}`;
       if (routeKeys.has(key)) return false;
       routeKeys.add(key);
       return true;
@@ -2359,8 +2620,8 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
     loadTimelines: animationSchedule.loadTimelines,
     jobs: adjustedJobs,
     distance: animationSchedule.operators.reduce((sum, operator) => sum + operator.distance, 0),
-    loadedDistance,
-    travelMinutes: plannedTravelMinutes,
+    loadedDistance: animationSchedule.totalLoadedDistance,
+    travelMinutes: animationSchedule.totalLoadedDistance / input.speed,
     cutWaitMinutes: animationSchedule.waitForReadyMinutes,
     serviceMinutes: plannedServiceMinutes,
     cycleMinutes: dailyWorkMinutes,
@@ -2377,12 +2638,15 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
     fleetStemsPerHour: totalStems / (dailyWorkMinutes / 60),
     dailyCapacity: totalStems,
     weeklyCapacity: totalStems * WORK_DAYS_PER_WEEK,
-    requiredOperators: operatorMinutesEquivalent,
+    requiredOperators: input.networkType === "cable" ? cableEquivalentOperators : operatorMinutesEquivalent,
     requiredOperatorsRounded,
     cutterMultiplier: animationCutterMultiplier,
     adjustedCuttersDay,
     feasible,
-    operatorGap: input.units - operatorMinutesEquivalent,
+    operatorGap: input.units - (input.networkType === "cable" ? requiredOperatorsRounded : operatorMinutesEquivalent),
+    garrucheroStemsPerHour: input.networkType === "cable" ? GARRUCHERO_STEMS_PER_HOUR : null,
+    operatorCapacityShortfall: cableCapacityShortfall,
+    unservedTrips: animationSchedule.unservedTrips,
     loadSetsRequired: requiredLoadSets,
     loadSetGap,
     balance: input.units * dailyWorkMinutes - animationSchedule.totalBusyMinutes,
@@ -2452,8 +2716,8 @@ function renderMethodCard(result) {
     ["Jornada efectiva", formatHours(result.dayWorkMinutes / 60)],
     ["Desayuno", "45 min 11:00"],
     ["Operadores disp.", `${result.units} ${result.unitLabel}`],
-    ["Operadores req.", result.feasible ? `${result.requiredOperators.toFixed(1)} / ${result.requiredOperatorsRounded}` : `>${result.units}`],
-    ["Gabela oper.", result.feasible ? `${result.operatorGap >= 0 ? "+" : ""}${result.operatorGap.toFixed(1)}` : "No cabe"],
+    ["Operadores req.", `${result.requiredOperators.toFixed(1)} equiv. / ${result.requiredOperatorsRounded}`],
+    ["Gabela oper.", result.operatorGap >= 0 ? `+${result.operatorGap.toFixed(1)}` : `Faltan ${Math.abs(result.operatorGap).toFixed(1)}`],
     ["Vehiculos req.", `${result.loadSetsRequired} de ${result.maxLoadSets}`],
     ["Ritmo de corte", result.cutterMultiplier > 1.01 ? `${result.cutterMultiplier.toFixed(2)}x` : "Base"],
     ["Gabela veh.", `${result.loadSetGap >= 0 ? "+" : ""}${result.loadSetGap}`],
@@ -2465,8 +2729,20 @@ function renderMethodCard(result) {
     ["Traslado cargado", formatMinutes(result.travelMinutes)],
     ["Espera llenado", formatMinutes(result.cutWaitMinutes)],
     ["Tallos/h jornada", formatInteger(result.fleetStemsPerHour)],
-    ["Balance horas", result.feasible ? `${result.balance >= 0 ? "+" : ""}${formatHours(result.balance / 60)}` : `-${formatHours(result.overWorkMinutes / 60)}`],
+    ["Balance horas", result.feasible ? `${result.balance >= 0 ? "+" : ""}${formatHours(result.balance / 60)}` : (result.unservedTrips ? `${result.unservedTrips} viajes sin servir` : `-${formatHours(result.overWorkMinutes / 60)}`)],
   ];
+  if (result.networkType === "cable") {
+    stats.splice(
+      4,
+      0,
+      ["Rend. garruchero", `${formatInteger(result.garrucheroStemsPerHour)} tallos/h`],
+      ["Asignacion por bloque", "1 o 2 garrucheros"],
+      ["Bloque ocupado", "Desvio automatico"],
+    );
+    if (result.operatorCapacityShortfall > 0) {
+      stats.splice(7, 0, ["Faltante capacidad", `${formatInteger(result.operatorCapacityShortfall)} tallos`]);
+    }
+  }
   for (const [label, value] of stats) {
     const item = document.createElement("div");
     item.className = "method-stat";
@@ -2483,7 +2759,13 @@ function renderMethodCard(result) {
   for (const [index, job] of result.jobs.entries()) {
     const row = document.createElement("div");
     row.className = "block-trip-row";
-    row.innerHTML = `<span>${index + 1}. ${job.block.label}</span><span>${job.flower.label}</span><strong>${formatInteger(job.tripsNeeded)} viajes</strong><small>${formatInteger(job.demand)} tallos | ${formatInteger(job.stemsPerTrip)} tallos/viaje | ultimo ${formatInteger(job.lastTripStems)} | ${formatInteger(job.productionPerHour)} tallos/h de corte | ${formatMinutes(job.timeToFullTripMinutes)} para llenar viaje</small>`;
+    const operatorText = result.networkType === "cable"
+      ? ` | ${job.blockOperatorsNeeded} ${job.blockOperatorsNeeded === 1 ? "garruchero" : "garrucheros"} (${job.garrucheroEquivalent.toFixed(1)} equiv.)`
+      : "";
+    const capacityText = job.operatorCapacityShortfall > 0
+      ? ` | faltan ${formatInteger(job.operatorCapacityShortfall)} tallos de capacidad`
+      : "";
+    row.innerHTML = `<span>${index + 1}. ${job.block.label}</span><span>${job.flower.label}</span><strong>${formatInteger(job.tripsNeeded)} viajes</strong><small>${formatInteger(job.demand)} tallos${operatorText} | ${formatInteger(job.stemsPerTrip)} tallos/viaje | ultimo ${formatInteger(job.lastTripStems)} | ${formatInteger(job.productionPerHour)} tallos/h de corte | ${formatMinutes(job.timeToFullTripMinutes)} para llenar viaje${capacityText}</small>`;
     jobList.appendChild(row);
   }
 
@@ -2527,7 +2809,8 @@ function calculateSimulation() {
   const displayRoutes = [];
   const routeKeys = new Set();
   for (const route of results.flatMap((result) => result.routes)) {
-    const key = `${route.networkType}:${route.origin?.type}:${route.origin?.id}:${route.destination?.type}:${route.destination?.id}:${route.routeColor}`;
+    const avoided = (route.avoidedBlockIds || []).join(",");
+    const key = `${route.networkType}:${route.origin?.type}:${route.origin?.id}:${route.destination?.type}:${route.destination?.id}:${avoided}:${route.routeColor}`;
     if (routeKeys.has(key)) continue;
     routeKeys.add(key);
     displayRoutes.push(route);

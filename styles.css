@@ -1208,6 +1208,15 @@ button:focus-visible {
   border-left-color: #5d7f3d;
 }
 
+.cutter-plan-note {
+  padding: 8px;
+  border-left: 3px solid #5d7f3d;
+  background: #f1f6ec;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 
 .simulation-vehicle.loaded .simulation-marker-core {
   stroke: #163d27;

@@ -1587,6 +1587,111 @@ function demandPlanByFlower(planRows, weeklyHours = 0) {
   return demandByFlower;
 }
 
+function dailyDemandForPlanRow(row, demandByFlower) {
+  if (state.useDailyBlockDemand) return Math.max(0, Number(row.dailyDemand) || 0);
+  return demandByFlower.get(row.flowerKey)?.perBlockDemand || 0;
+}
+
+function buildCutterWorkforcePlan(planRows, demandByFlower, weeklyHours, transportEquivalent = 0) {
+  const dailyWorkMinutes = Math.max(0, weeklyHours / WORK_DAYS_PER_WEEK * 60);
+  const entries = planRows.map((row, index) => {
+    const demand = dailyDemandForPlanRow(row, demandByFlower);
+    const workMinutes = row.flower.cutterRate > 0 ? demand / row.flower.cutterRate * 60 : 0;
+    return {
+      id: row.id,
+      index,
+      block: row.block,
+      flower: row.flower,
+      demand,
+      workMinutes,
+      remainingWorkMinutes: workMinutes,
+      initialCutters: 0,
+      currentCutters: 0,
+      peakCutters: 0,
+      finishWorkMinutes: 0,
+      transfers: [],
+    };
+  });
+  const activeEntries = entries.filter((entry) => entry.workMinutes > 0);
+  const totalWorkMinutes = activeEntries.reduce((sum, entry) => sum + entry.workMinutes, 0);
+  const equivalentCutters = dailyWorkMinutes > 0 ? totalWorkMinutes / dailyWorkMinutes : 0;
+  const staffingEquivalent = Math.max(equivalentCutters, Number(transportEquivalent) || 0);
+  const totalCutters = activeEntries.length
+    ? Math.max(activeEntries.length, Math.ceil(staffingEquivalent - 1e-9))
+    : 0;
+
+  for (const entry of activeEntries) {
+    entry.initialCutters = 1;
+    entry.currentCutters = 1;
+    entry.peakCutters = 1;
+  }
+
+  function entryNeedingCutter(candidates) {
+    return candidates.reduce((best, entry) => {
+      if (!best) return entry;
+      const entryDuration = entry.remainingWorkMinutes / Math.max(1, entry.currentCutters);
+      const bestDuration = best.remainingWorkMinutes / Math.max(1, best.currentCutters);
+      return entryDuration > bestDuration + 1e-9 ? entry : best;
+    }, null);
+  }
+
+  for (let remaining = totalCutters - activeEntries.length; remaining > 0; remaining -= 1) {
+    const entry = entryNeedingCutter(activeEntries);
+    entry.initialCutters += 1;
+    entry.currentCutters += 1;
+    entry.peakCutters = Math.max(entry.peakCutters, entry.currentCutters);
+  }
+
+  let elapsed = 0;
+  let unfinished = [...activeEntries];
+  let guard = 0;
+  while (unfinished.length && guard < 10000) {
+    guard += 1;
+    const elapsedToNextFinish = Math.min(...unfinished.map((entry) => entry.remainingWorkMinutes / entry.currentCutters));
+    if (!Number.isFinite(elapsedToNextFinish)) break;
+    elapsed += elapsedToNextFinish;
+    for (const entry of unfinished) {
+      entry.remainingWorkMinutes = Math.max(0, entry.remainingWorkMinutes - entry.currentCutters * elapsedToNextFinish);
+    }
+
+    const finished = unfinished.filter((entry) => entry.remainingWorkMinutes <= 1e-6);
+    let releasedCutters = 0;
+    for (const entry of finished) {
+      entry.finishWorkMinutes = elapsed;
+      releasedCutters += entry.currentCutters;
+      entry.currentCutters = 0;
+    }
+    unfinished = unfinished.filter((entry) => entry.remainingWorkMinutes > 1e-6);
+    if (!unfinished.length) break;
+
+    const transfersByEntry = new Map();
+    for (let index = 0; index < releasedCutters; index += 1) {
+      const recipient = entryNeedingCutter(unfinished);
+      recipient.currentCutters += 1;
+      recipient.peakCutters = Math.max(recipient.peakCutters, recipient.currentCutters);
+      transfersByEntry.set(recipient, (transfersByEntry.get(recipient) || 0) + 1);
+    }
+    for (const [entry, added] of transfersByEntry) {
+      entry.transfers.push({ workMinutes: elapsed, added, total: entry.currentCutters });
+    }
+  }
+
+  return {
+    entries,
+    totalCutters,
+    equivalentCutters,
+    staffingEquivalent,
+    totalWorkMinutes,
+    initialCutters: activeEntries.reduce((sum, entry) => sum + entry.initialCutters, 0),
+    transferredCutters: entries.reduce((sum, entry) => sum + entry.transfers.reduce((subtotal, transfer) => subtotal + transfer.added, 0), 0),
+    transferMoments: entries.reduce((sum, entry) => sum + entry.transfers.length, 0),
+    finishWorkMinutes: activeEntries.reduce((max, entry) => Math.max(max, entry.finishWorkMinutes), 0),
+    dailyWorkMinutes,
+    includesTransportAdjustment: staffingEquivalent > equivalentCutters + 0.01,
+    manualMode: state.useDailyBlockDemand,
+  };
+}
+
 function routeForNetwork(origin, destination, speed, networkType) {
   const previousNetworkType = state.networkType;
   state.networkType = networkType;
@@ -1802,8 +1907,7 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
   }
 
   for (const row of planRows) {
-    const demandInfo = demandByFlower.get(row.flowerKey);
-    const blockDemand = state.useDailyBlockDemand ? Math.max(0, Number(row.dailyDemand) || 0) : (demandInfo?.perBlockDemand || 0);
+    const blockDemand = dailyDemandForPlanRow(row, demandByFlower);
     const dailyWorkHours = dailyWorkMinutes / 60;
     const cuttersNeeded = dailyWorkHours > 0 && row.flower.cutterRate > 0 ? (blockDemand / dailyWorkHours) / row.flower.cutterRate : 0;
     const productionPerMinute = cuttersNeeded * row.flower.cutterRate / 60;
@@ -2168,20 +2272,21 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
   };
 }
 
-function renderCutterSummaryCard(demandByFlower) {
+function renderCutterSummaryCard(cutterPlan) {
   const card = document.createElement("div");
   card.className = "method-card cutter-summary";
   const title = document.createElement("h3");
-  title.textContent = "Cortadores requeridos";
+  title.textContent = "Cortadores requeridos en la finca";
   const grid = document.createElement("div");
   grid.className = "method-stat-grid";
-  const infos = [...demandByFlower.values()];
   const totals = [
-    ["Cortadores dia", infos.reduce((sum, info) => sum + info.cuttersDay, 0).toFixed(1)],
-    ["Cortadores sem.", infos.reduce((sum, info) => sum + info.cuttersWeek, 0).toFixed(1)],
-    ["Horas corte dia", formatHours(infos.reduce((sum, info) => sum + info.cutterHoursDay, 0))],
-    ["Meta tallos/h", formatInteger(infos.reduce((sum, info) => sum + (info.dailyDemand / Math.max(0.0001, inputDailyHours())), 0))],
-    ["Modo demanda", infos.some((info) => info.manualMode) ? "Diaria manual" : "Semanal"],
+    ["Total finca", `${cutterPlan.totalCutters} personas`],
+    ["Equivalente minimo", cutterPlan.equivalentCutters.toFixed(1)],
+    ["Asignados 06:00", `${cutterPlan.initialCutters} personas`],
+    ["Personas reasignadas", formatInteger(cutterPlan.transferredCutters)],
+    ["Horas-persona", formatHours(cutterPlan.totalWorkMinutes / 60)],
+    ["Ultimo corte", formatSimulationClock(workToWallEnd(cutterPlan.finishWorkMinutes))],
+    ["Modo demanda", cutterPlan.manualMode ? "Diaria manual" : "Semanal"],
   ];
   for (const [label, value] of totals) {
     const item = document.createElement("div");
@@ -2193,15 +2298,24 @@ function renderCutterSummaryCard(demandByFlower) {
     item.append(span, strong);
     grid.appendChild(item);
   }
+  const note = document.createElement("div");
+  note.className = "cutter-plan-note";
+  note.textContent = cutterPlan.includesTransportAdjustment
+    ? "La dotacion incluye el ritmo adicional necesario para que el transporte termine dentro de la jornada. Los traslados de cortadores entre bloques se consideran inmediatos."
+    : "Cada persona se cuenta una sola vez y pasa a otro bloque cuando termina. Los traslados entre bloques se consideran inmediatos.";
   const list = document.createElement("div");
   list.className = "block-trip-list";
-  for (const info of infos) {
+  for (const entry of cutterPlan.entries) {
     const row = document.createElement("div");
     row.className = "block-trip-row cutter-row";
-    row.innerHTML = `<span>${info.flower.label}</span><span>${formatInteger(info.flower.cutterRate)} tallos/h</span><strong>${info.cuttersDay.toFixed(1)} pers.</strong><small>${formatInteger(info.dailyDemand)} tallos/dia en ${info.count} bloques | ${formatInteger(info.perBlockDemand)} tallos/bloque | ${formatInteger(info.stemsPerBlockHour)} tallos/h/bloque | ${info.cuttersPerBlock.toFixed(1)} cortadores/bloque</small>`;
+    const transferText = entry.transfers.length
+      ? entry.transfers.map((transfer) => `+${transfer.added} a las ${formatSimulationClock(workToWallStart(transfer.workMinutes))} (${transfer.total} en bloque)`).join("; ")
+      : "sin refuerzo posterior";
+    const finishText = entry.workMinutes > 0 ? formatSimulationClock(workToWallEnd(entry.finishWorkMinutes)) : "sin corte";
+    row.innerHTML = `<span>${entry.index + 1}. ${entry.block.label}</span><span>${entry.flower.label}</span><strong>${entry.initialCutters} a las 06:00</strong><small>${formatInteger(entry.demand)} tallos | ${formatHours(entry.workMinutes / 60)} de corte | termina ${finishText} | ${transferText}</small>`;
     list.appendChild(row);
   }
-  card.append(title, grid, list);
+  card.append(title, grid, note, list);
   return card;
 }
 
@@ -2223,8 +2337,7 @@ function renderMethodCard(result) {
     ["Operadores req.", result.feasible ? `${result.requiredOperators.toFixed(1)} / ${result.requiredOperatorsRounded}` : `>${result.units}`],
     ["Gabela oper.", result.feasible ? `${result.operatorGap >= 0 ? "+" : ""}${result.operatorGap.toFixed(1)}` : "No cabe"],
     ["Vehiculos req.", `${result.loadSetsRequired} de ${result.maxLoadSets}`],
-    ["Cortadores req.", result.adjustedCuttersDay ? result.adjustedCuttersDay.toFixed(1) : "-"],
-    ["Ajuste corte", result.cutterMultiplier > 1.01 ? `${result.cutterMultiplier.toFixed(2)}x` : "Base"],
+    ["Ritmo de corte", result.cutterMultiplier > 1.01 ? `${result.cutterMultiplier.toFixed(2)}x` : "Base"],
     ["Gabela veh.", `${result.loadSetGap >= 0 ? "+" : ""}${result.loadSetGap}`],
     ["Bloques", formatInteger(result.jobs.length)],
     ["Viajes plan", formatInteger(result.tripsNeeded)],
@@ -2252,7 +2365,7 @@ function renderMethodCard(result) {
   for (const [index, job] of result.jobs.entries()) {
     const row = document.createElement("div");
     row.className = "block-trip-row";
-    row.innerHTML = `<span>${index + 1}. ${job.block.label}</span><span>${job.flower.label}</span><strong>${formatInteger(job.tripsNeeded)} viajes</strong><small>${formatInteger(job.demand)} tallos | ${formatInteger(job.stemsPerTrip)} tallos/viaje | ultimo ${formatInteger(job.lastTripStems)} | ${job.cuttersNeeded.toFixed(1)} cortadores | ${formatMinutes(job.timeToFullTripMinutes)} para llenar viaje</small>`;
+    row.innerHTML = `<span>${index + 1}. ${job.block.label}</span><span>${job.flower.label}</span><strong>${formatInteger(job.tripsNeeded)} viajes</strong><small>${formatInteger(job.demand)} tallos | ${formatInteger(job.stemsPerTrip)} tallos/viaje | ultimo ${formatInteger(job.lastTripStems)} | ${formatInteger(job.productionPerHour)} tallos/h de corte | ${formatMinutes(job.timeToFullTripMinutes)} para llenar viaje</small>`;
     jobList.appendChild(row);
   }
 
@@ -2319,9 +2432,9 @@ function calculateSimulation() {
   const dailyHours = weeklyHours / WORK_DAYS_PER_WEEK;
   const hourlyDemand = dailyHours > 0 ? dailyDemand / dailyHours : 0;
   const bucketsNeeded = Math.ceil(dailyDemand / bucketStems);
-  const cutterHours = [...demandByFlower.values()].reduce((sum, info) => sum + info.cutterHoursDay, 0);
   const cutterEquivalent = [...demandByFlower.values()].reduce((sum, info) => sum + info.cuttersDay, 0);
-  const cutterWeeklyEquivalent = [...demandByFlower.values()].reduce((sum, info) => sum + info.cuttersWeek, 0);
+  const adjustedCutterEquivalent = results.reduce((max, result) => Math.max(max, result.adjustedCuttersDay || 0), cutterEquivalent);
+  const cutterPlan = buildCutterWorkforcePlan(planRows, demandByFlower, weeklyHours, adjustedCutterEquivalent);
   const destinationLabels = [...new Set(planRows.map((row) => row.post.label))].join(", ");
   const totalPlanMinutes = results.reduce((max, result) => Math.max(max, result.dayWallMinutes || result.totalMinutes), 0);
   const totalTrips = results[0]?.tripsNeeded || 0;
@@ -2332,14 +2445,13 @@ function calculateSimulation() {
   els.simDailyDemandMetric.textContent = formatInteger(dailyDemand);
   els.simHourlyDemandMetric.textContent = `${formatInteger(hourlyDemand)}/h`;
   els.simBucketsMetric.textContent = formatInteger(bucketsNeeded);
-  const adjustedCutterEquivalent = results.reduce((max, result) => Math.max(max, result.adjustedCuttersDay || 0), cutterEquivalent);
-  els.simCutMetric.textContent = `${cutterEquivalent.toFixed(1)} base / ${adjustedCutterEquivalent.toFixed(1)} sim.`;
+  els.simCutMetric.textContent = `${cutterPlan.totalCutters} finca / ${cutterPlan.equivalentCutters.toFixed(1)} equiv.`;
   const cutWaitMinutes = results[0]?.cutWaitMinutes || 0;
-  els.routeSummary.textContent = `Plan diario con ${planRows.length} bloques. Demanda diaria: ${formatInteger(dailyDemand)} tallos en ${dailyHours.toFixed(2)} h efectivas/dia; meta: ${formatInteger(hourlyDemand)} tallos/h. Cortadores base: ${cutterEquivalent.toFixed(1)}; cortadores simulados: ${adjustedCutterEquivalent.toFixed(1)}. Viajes calculados: ${formatInteger(totalTrips)}. Espera por llenado: ${formatMinutes(cutWaitMinutes)}. ${feasibleText}`;
+  els.routeSummary.textContent = `Plan diario con ${planRows.length} bloques. Demanda diaria: ${formatInteger(dailyDemand)} tallos en ${dailyHours.toFixed(2)} h efectivas/dia; meta: ${formatInteger(hourlyDemand)} tallos/h. Cortadores unicos en la finca: ${cutterPlan.totalCutters}; se reasignan ${formatInteger(cutterPlan.transferredCutters)} personas al terminar bloques. Viajes calculados: ${formatInteger(totalTrips)}. Espera por llenado: ${formatMinutes(cutWaitMinutes)}. ${feasibleText}`;
   els.hint.textContent = `${planRows[0].block.label} -> ${planRows[planRows.length - 1].post.label}`;
 
   clearElement(els.simMethodResults);
-  els.simMethodResults.appendChild(renderCutterSummaryCard(demandByFlower));
+  els.simMethodResults.appendChild(renderCutterSummaryCard(cutterPlan));
   for (const result of results) els.simMethodResults.appendChild(renderMethodCard(result));
   for (const error of errors) els.simMethodResults.appendChild(renderErrorCard(error.label, error.message));
 }

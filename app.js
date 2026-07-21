@@ -1846,7 +1846,7 @@ function methodInputs(networkType, bucketStems, weeklyHours) {
       weeklyHours,
     };
   }
-  const units = Math.max(0, Math.min(4, readInteger(els.simGarruchas, 4)));
+  const units = Math.max(0, Math.min(9, readInteger(els.simGarruchas, 9)));
   const wagons = Math.min(13, Math.max(1, readInteger(els.simWagons, 13)));
   const bucketsPerWagon = Math.min(2, Math.max(1, readInteger(els.simBucketsPerWagon, 2)));
   const bucketsPerTrip = wagons * bucketsPerWagon;

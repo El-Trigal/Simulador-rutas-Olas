@@ -53,7 +53,7 @@ const FLOWER_CONFIGS = {
 const BLOCK_MINUTES = 5;
 const POST_MINUTES = 5;
 const WORK_DAYS_PER_WEEK = 6;
-const WORK_START_MINUTES = 6 * 60;
+const WORK_START_MINUTES = 6 * 60 + 15;
 const BREAK_START_CLOCK_MINUTES = 11 * 60;
 const BREAK_DURATION_MINUTES = 45;
 const BREAK_START_WORK_MINUTES = BREAK_START_CLOCK_MINUTES - WORK_START_MINUTES;
@@ -2402,7 +2402,7 @@ function renderCutterSummaryCard(cutterPlan) {
   const totals = [
     ["Total finca", `${cutterPlan.totalCutters} personas`],
     ["Equivalente minimo", cutterPlan.equivalentCutters.toFixed(1)],
-    ["Asignados 06:00", `${cutterPlan.initialCutters} personas`],
+    ["Asignados 06:15", `${cutterPlan.initialCutters} personas`],
     ["Movimientos entre bloques", formatInteger(cutterPlan.transferredCutters)],
     ["Horas-persona", formatHours(cutterPlan.totalWorkMinutes / 60)],
     ["Ultimo corte", formatSimulationClock(workToWallEnd(cutterPlan.finishWorkMinutes))],
@@ -2420,7 +2420,7 @@ function renderCutterSummaryCard(cutterPlan) {
   }
   const note = document.createElement("div");
   note.className = "cutter-plan-note";
-  note.textContent = "Cada persona se cuenta una sola vez. Los bloques con 0 cortadores a las 06:00 quedan pendientes hasta que se libere personal de otro bloque; el traslado se considera inmediato.";
+  note.textContent = "Cada persona se cuenta una sola vez. Los bloques con 0 cortadores a las 06:15 quedan pendientes hasta que se libere personal de otro bloque; el traslado se considera inmediato.";
   const list = document.createElement("div");
   list.className = "block-trip-list";
   for (const entry of cutterPlan.entries) {
@@ -2430,7 +2430,7 @@ function renderCutterSummaryCard(cutterPlan) {
       ? entry.transfers.map((transfer) => `+${transfer.added} a las ${formatSimulationClock(workToWallStart(transfer.workMinutes))} (${transfer.total} en bloque)`).join("; ")
       : "sin refuerzo posterior";
     const finishText = entry.workMinutes > 0 ? formatSimulationClock(workToWallEnd(entry.finishWorkMinutes)) : "sin corte";
-    row.innerHTML = `<span>${entry.index + 1}. ${entry.block.label}</span><span>${entry.flower.label}</span><strong>${entry.initialCutters} a las 06:00</strong><small>${formatInteger(entry.demand)} tallos | ${formatHours(entry.workMinutes / 60)} de corte | termina ${finishText} | ${transferText}</small>`;
+    row.innerHTML = `<span>${entry.index + 1}. ${entry.block.label}</span><span>${entry.flower.label}</span><strong>${entry.initialCutters} a las 06:15</strong><small>${formatInteger(entry.demand)} tallos | ${formatHours(entry.workMinutes / 60)} de corte | termina ${finishText} | ${transferText}</small>`;
     list.appendChild(row);
   }
   card.append(title, grid, note, list);
@@ -2438,7 +2438,7 @@ function renderCutterSummaryCard(cutterPlan) {
 }
 
 function inputDailyHours() {
-  return Math.max(0.0001, Math.max(0, readNumber(els.simWeeklyHours, 43.5)) / WORK_DAYS_PER_WEEK);
+  return Math.max(0.0001, Math.max(0, readNumber(els.simWeeklyHours, 42)) / WORK_DAYS_PER_WEEK);
 }
 
 function renderMethodCard(result) {
@@ -2507,7 +2507,7 @@ function calculateSimulation() {
   const planRows = selectedPlanRows();
   if (!planRows.length) return;
   const bucketStems = Math.max(1, readNumber(els.simBucketStems, 150));
-  const weeklyHours = Math.max(0, readNumber(els.simWeeklyHours, 43.5));
+  const weeklyHours = Math.max(0, readNumber(els.simWeeklyHours, 42));
   const demandByFlower = demandPlanByFlower(planRows, weeklyHours);
   const mode = selectedTransportMode();
   const methods = mode === "both" ? ["cable", "tractor"] : [mode];

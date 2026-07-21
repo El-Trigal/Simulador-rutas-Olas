@@ -1858,7 +1858,7 @@ function methodInputs(networkType, bucketStems, weeklyHours) {
     operatorSingularLabel: "Garruchero",
     loadSetLabel: "garrucha",
     pairedSetLabel: "2 garruchas",
-    maxLoadSets: 9,
+    maxLoadSets: units * 2,
     routeColor: "#0677c8",
     units,
     speed: Math.max(1, readNumber(els.simCableSpeed, 55)),

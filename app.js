@@ -54,7 +54,6 @@ const BLOCK_MINUTES = 5;
 const POST_MINUTES = 5;
 const WORK_DAYS_PER_WEEK = 6;
 const GARRUCHERO_STEMS_PER_HOUR = 2500;
-const MAX_GARRUCHEROS_PER_BLOCK = 2;
 const WORK_START_MINUTES = 6 * 60 + 15;
 const BREAK_START_CLOCK_MINUTES = 11 * 60;
 const BREAK_DURATION_MINUTES = 45;
@@ -2165,7 +2164,7 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
       ? blockDemand / (GARRUCHERO_STEMS_PER_HOUR * dailyWorkHours)
       : 0;
     const blockOperatorsNeeded = input.networkType === "cable" && blockDemand > 0
-      ? Math.min(MAX_GARRUCHEROS_PER_BLOCK, Math.max(1, Math.ceil(garrucheroEquivalent - 1e-9)))
+      ? Math.max(1, Math.ceil(garrucheroEquivalent - 1e-9))
       : 0;
     const operatorBlockCapacity = blockOperatorsNeeded * GARRUCHERO_STEMS_PER_HOUR * dailyWorkHours;
     const operatorCapacityShortfall = Math.max(0, blockDemand - operatorBlockCapacity);
@@ -2736,7 +2735,7 @@ function renderMethodCard(result) {
       4,
       0,
       ["Rend. garruchero", `${formatInteger(result.garrucheroStemsPerHour)} tallos/h`],
-      ["Asignacion por bloque", "1 o 2 garrucheros"],
+      ["Asignacion por bloque", "Segun demanda"],
       ["Bloque ocupado", "Desvio automatico"],
     );
     if (result.operatorCapacityShortfall > 0) {

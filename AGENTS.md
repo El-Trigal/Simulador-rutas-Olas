@@ -65,7 +65,8 @@ Esta app es un MVP local para simular rutas y capacidad de transporte en una fin
 
 - En cable via, dos garruchas no pueden ocupar el mismo tramo al mismo tiempo.
 - El rendimiento operativo de cada garruchero es 2500 tallos/hora.
-- Se asignan 1 o 2 garrucheros por bloque segun la demanda diaria, con maximo 2 por bloque.
+- Se asignan tantos garrucheros por bloque como requiera la demanda diaria.
+- No existe un maximo de garrucheros por bloque; el unico limite es la disponibilidad global de 9 garrucheros en la finca.
 - Si una garrucha ocupa un bloque, otra garrucha en movimiento no espera para atravesarlo: ese bloque se excluye temporalmente del grafo y se usa la ruta alternativa mas rapida.
 - La espera por conflicto se conserva unicamente cuando dos garruchas intentan ocupar el mismo tramo fisico del cable via.
 - En via de tractor, los tractores si pueden compartir tramo porque la via es doble sentido y doble carril.

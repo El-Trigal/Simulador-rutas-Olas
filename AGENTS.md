@@ -92,6 +92,9 @@ El ciclo debe modelarse asi:
 ## Visualizacion de simulacion
 
 - La simulacion debe mostrar varios operarios/vehiculos, no un solo objeto por metodo.
+- La velocidad maxima de reproduccion es 250x.
+- El mapa debe mostrar la ruta planificada de todos los bloques seleccionados, incluso si un viaje queda sin servir.
+- Los desvios calculados durante la simulacion deben mostrarse junto con las rutas planificadas.
 - Etiquetas actuales:
   - `V`: lleva vacio.
   - `L`: lleva lleno.

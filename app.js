@@ -1394,7 +1394,7 @@ function updatePlaybackUi() {
   const sim = state.simulation;
   const hasPlayback = sim.vehicles.length > 0 || sim.cutterBlocks.length > 0;
   if (els.simPlaybackSpeed) {
-    sim.speedMultiplier = Math.max(1, Math.min(100, Number(els.simPlaybackSpeed.value) || 10));
+    sim.speedMultiplier = Math.max(1, Math.min(250, Number(els.simPlaybackSpeed.value) || 10));
     els.simPlaybackSpeed.value = String(sim.speedMultiplier);
     if (els.simPlaybackSpeedLabel) els.simPlaybackSpeedLabel.textContent = `${sim.speedMultiplier}x`;
   }
@@ -2608,7 +2608,7 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
 
   return {
     ...input,
-    routes: animationSchedule.usedRoutes.filter((route) => {
+    routes: [...jobs.map((job) => job.loadedRoute), ...animationSchedule.usedRoutes].filter((route) => {
       const avoided = (route.avoidedBlockIds || []).join(",");
       const key = `${route.networkType}:${route.origin?.type}:${route.origin?.id}:${route.destination?.type}:${route.destination?.id}:${avoided}:${input.routeColor}`;
       if (routeKeys.has(key)) return false;

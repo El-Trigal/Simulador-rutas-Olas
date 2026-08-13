@@ -106,16 +106,22 @@ confirmar que estan en la misma escala.
   son `null` en `els`. Llamar a esas funciones lanza excepcion. Tambien hay tres `export`
   (`getPlannerEntities`, `calculatePlannerRoute`, `displayPlannerRoute`) sin ningun
   consumidor. No sirven de ejemplo: no copiar ese patron.
-- **Un recalculo completo sigue costando cientos de milisegundos.** Medido en Chromium:
-  ~330-650 ms con garruchas (mediana, plan de 4-12 bloques), con picos sobre 1 s; el
-  tractor es dos ordenes de magnitud mas barato (2-19 ms). El 72% del tiempo es Dijkstra.
-  Los eventos `input` ya pasan por `scheduleSimulation` (debounce de 150 ms), asi que al
-  teclear se agrupa; los clics y los `change` llaman `calculateSimulation` directo. **Al
-  agregar un control nuevo, engancharlo a `scheduleSimulation` si es de teclear.**
-  Pendiente: el cache de rutas es local a `simulateDailyPlanMethod` y se tira en cada
-  recalculo, asi que Dijkstra se repite entero aunque las rutas no hayan cambiado. Subirlo
-  a nivel de modulo es el siguiente gran ahorro (el camino no depende de la velocidad:
-  solo `timeMinutes` y los offsets la usan, y escalan linealmente).
+- **Un recalculo completo cuesta ~120-240 ms con garruchas** (plan de 4-12 bloques,
+  Chromium); el tractor es un orden de magnitud mas barato. Los eventos `input` pasan por
+  `scheduleSimulation` (debounce de 150 ms), asi que al teclear se agrupa; los clics y los
+  `change` llaman `calculateSimulation` directo. **Al agregar un control nuevo,
+  engancharlo a `scheduleSimulation` si es de teclear.**
+- **El punto caliente es `nextRouteStart`, no el ruteo.** Es contraintuitivo y ya costo
+  una optimizacion equivocada, asi que conviene dejarlo escrito: en un recalculo tibio
+  `dijkstra` es el 0,2% del tiempo, porque el cache local de `simulateDailyPlanMethod`
+  reduce el ruteo a ~16 busquedas por recalculo. Subir ese cache a nivel de modulo se
+  probo y **no mejora nada medible**; no vale la pena reintentarlo. El costo real esta en
+  que `nextRouteStart` se llama ~13.600 veces por recalculo desde el greedy de
+  `scheduleWith`, multiplicado por las ~30 llamadas del binary search de
+  `findCutterMultiplier`. Ya usa cursores que solo avanzan (aprovechando que `start` solo
+  crece y que las reservas estan ordenadas por inicio); sigue siendo el ~30% del tiempo.
+  Bajarlo mas exige reducir el numero de llamadas, es decir tocar el greedy. **Si vas a
+  optimizar, perfila un solo recalculo primero: el perfil de varios seguidos enganna.**
 - **`isBlock46` (`app.js:709`)** es un caso especial cableado para el bloque "46" sin
   explicacion. Al tocar el enganche a la red, tenerlo presente.
 - **Todo el repo es ASCII estricto**, sin tildes ni enies, aunque los archivos declaran

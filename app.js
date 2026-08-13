@@ -2072,22 +2072,37 @@ function intervalsOverlap(start, end, booking) {
   return start < booking.end && end > booking.start;
 }
 
+// Busca el primer instante >= earliestStart en el que la ruta completa cabe sin pisar
+// ninguna reserva de tramo. Cada vez que choca, desplaza el inicio y vuelve a revisar
+// todos los tramos, porque mover el inicio mueve tambien los tramos ya revisados.
+//
+// Ese reintento es el punto caliente de la simulacion, asi que se apoya en dos hechos:
+// start solo crece, y las reservas de cada tramo estan ordenadas por inicio. Con un
+// cursor por tramo que solo avanza, una reserva que ya quedo en el pasado no se vuelve
+// a mirar nunca, y el trabajo total pasa de (reintentos x tramos x reservas) a lineal.
 function nextRouteStart(route, earliestStart, reservations) {
   if (!reservations || !route?.segments?.length) return earliestStart;
+  const segments = route.segments;
+  const cursors = new Array(segments.length).fill(0);
   let start = Math.max(0, earliestStart);
   for (let guard = 0; guard < 1000; guard += 1) {
     let shifted = false;
-    for (const occupation of route.segments || []) {
-      const bookings = reservations.get(occupation.resourceKey) || [];
+    for (let index = 0; index < segments.length; index += 1) {
+      const occupation = segments[index];
+      const bookings = reservations.get(occupation.resourceKey);
+      if (!bookings?.length) continue;
       const intervalStart = start + occupation.offsetStartMinutes;
       const intervalEnd = start + occupation.offsetEndMinutes;
-      for (const booking of bookings) {
-        if (!intervalsOverlap(intervalStart, intervalEnd, booking)) continue;
-        start = booking.end - occupation.offsetStartMinutes;
+      let cursor = cursors[index];
+      while (cursor < bookings.length && bookings[cursor].end <= intervalStart) cursor += 1;
+      cursors[index] = cursor;
+      // bookings[cursor] es la primera reserva que aun no ha terminado; si esa no se
+      // solapa, ninguna posterior puede hacerlo porque empiezan aun mas tarde.
+      if (cursor < bookings.length && bookings[cursor].start < intervalEnd) {
+        start = bookings[cursor].end - occupation.offsetStartMinutes;
         shifted = true;
         break;
       }
-      if (shifted) break;
     }
     if (!shifted) return start;
     if (!Number.isFinite(start)) return Infinity;
@@ -2095,28 +2110,39 @@ function nextRouteStart(route, earliestStart, reservations) {
   return Infinity;
 }
 
+// Mantiene la lista ordenada por inicio, que es lo que asume nextRouteStart. Insertar en
+// su sitio evita reordenar la lista entera en cada reserva.
+function insertBooking(list, booking) {
+  let low = 0;
+  let high = list.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (list[mid].start <= booking.start) low = mid + 1;
+    else high = mid;
+  }
+  list.splice(low, 0, booking);
+}
+
 function reserveRoute(route, start, reservations, label, blockPassageReservations = null) {
   if (!Number.isFinite(start)) return;
   for (const occupation of route?.segments || []) {
     if (!reservations) break;
     const list = reservations.get(occupation.resourceKey) || [];
-    list.push({
+    insertBooking(list, {
       start: start + occupation.offsetStartMinutes,
       end: start + occupation.offsetEndMinutes,
       label,
     });
-    list.sort((a, b) => a.start - b.start);
     reservations.set(occupation.resourceKey, list);
   }
   for (const passage of route?.blockPassages || []) {
     if (!blockPassageReservations) break;
     const list = blockPassageReservations.get(passage.blockId) || [];
-    list.push({
+    insertBooking(list, {
       start: start + passage.offsetStartMinutes,
       end: start + passage.offsetEndMinutes,
       label,
     });
-    list.sort((a, b) => a.start - b.start);
     blockPassageReservations.set(passage.blockId, list);
   }
 }

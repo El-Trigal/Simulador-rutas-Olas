@@ -106,11 +106,16 @@ confirmar que estan en la misma escala.
   son `null` en `els`. Llamar a esas funciones lanza excepcion. Tambien hay tres `export`
   (`getPlannerEntities`, `calculatePlannerRoute`, `displayPlannerRoute`) sin ningun
   consumidor. No sirven de ejemplo: no copiar ese patron.
-- **La simulacion es cara y no esta debounced.** `calculateSimulation` esta suscrito al
-  evento `input` de 13 controles (`app.js:3027`), asi que cada tecla dispara un recalculo
-  completo. Medido en Chromium: ~330-650 ms con garruchas (mediana, plan de 4-12 bloques),
-  con picos sobre 1 s. El 72% del tiempo es Dijkstra; el ruteo se recalcula desde cero en
-  cada recalculo porque el cache de rutas es local a `simulateDailyPlanMethod`.
+- **Un recalculo completo sigue costando cientos de milisegundos.** Medido en Chromium:
+  ~330-650 ms con garruchas (mediana, plan de 4-12 bloques), con picos sobre 1 s; el
+  tractor es dos ordenes de magnitud mas barato (2-19 ms). El 72% del tiempo es Dijkstra.
+  Los eventos `input` ya pasan por `scheduleSimulation` (debounce de 150 ms), asi que al
+  teclear se agrupa; los clics y los `change` llaman `calculateSimulation` directo. **Al
+  agregar un control nuevo, engancharlo a `scheduleSimulation` si es de teclear.**
+  Pendiente: el cache de rutas es local a `simulateDailyPlanMethod` y se tira en cada
+  recalculo, asi que Dijkstra se repite entero aunque las rutas no hayan cambiado. Subirlo
+  a nivel de modulo es el siguiente gran ahorro (el camino no depende de la velocidad:
+  solo `timeMinutes` y los offsets la usan, y escalan linealmente).
 - **`isBlock46` (`app.js:709`)** es un caso especial cableado para el bloque "46" sin
   explicacion. Al tocar el enganche a la red, tenerlo presente.
 - **Todo el repo es ASCII estricto**, sin tildes ni enies, aunque los archivos declaran

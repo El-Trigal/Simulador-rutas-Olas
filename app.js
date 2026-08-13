@@ -1249,6 +1249,31 @@ function pointOnPolyline(points, fraction) {
   return points[points.length - 1];
 }
 
+function splitPolylineAt(points, fraction) {
+  if (!points || points.length < 2) return [points, points];
+  const total = polylineLength(points);
+  if (total <= 0) return [points, points];
+  const target = total * Math.max(0, Math.min(1, fraction));
+  const head = [points[0]];
+  let tail = null;
+  let traveled = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const from = points[i - 1];
+    const to = points[i];
+    const segmentLength = distance(from, to);
+    if (segmentLength <= 0) continue;
+    if (!tail && traveled + segmentLength >= target) {
+      const cut = pointOnLine(from, to, (target - traveled) / segmentLength);
+      if (distance(head[head.length - 1], cut) > 1e-9) head.push(cut);
+      tail = [cut];
+    }
+    const part = tail || head;
+    if (distance(part[part.length - 1], to) > 1e-9) part.push(to);
+    traveled += segmentLength;
+  }
+  return [head, tail || [points[points.length - 1]]];
+}
+
 function buildSimulationVehicles(results) {
   return results.flatMap((result) =>
     (result.operatorTimelines || []).map((timeline, index) => ({
@@ -1734,7 +1759,7 @@ function renderPlanRows() {
       dailyInput.value = String(Math.max(0, Math.round(Number(row.dailyDemand) || 0)));
       dailyInput.addEventListener("input", () => {
         row.dailyDemand = Math.max(0, Number(dailyInput.value) || 0);
-        calculateSimulation();
+        scheduleSimulation();
       });
       dailyField.append(dailyLabel, dailyInput);
     }
@@ -2014,10 +2039,12 @@ function addTimelineSegment(timeline, segment) {
   const end = segment.workEnd;
   if (end <= start) return;
   if (start < breakAt && end > breakAt) {
-    const point = segment.type === "travel"
-      ? pointOnPolyline(segment.points, (breakAt - start) / (end - start))
-      : segment.point;
-    addTimelineSegment(timeline, { ...segment, workStart: start, workEnd: breakAt, points: segment.type === "travel" ? [segment.points[0], point] : segment.points });
+    const isTravel = segment.type === "travel";
+    const [headPoints, tailPoints] = isTravel
+      ? splitPolylineAt(segment.points, (breakAt - start) / (end - start))
+      : [segment.points, segment.points];
+    const point = isTravel ? headPoints[headPoints.length - 1] : segment.point;
+    addTimelineSegment(timeline, { ...segment, workStart: start, workEnd: breakAt, points: headPoints });
     timeline.push({
       type: "wait",
       start: breakAt,
@@ -2026,7 +2053,7 @@ function addTimelineSegment(timeline, segment) {
       label: "Desayuno",
       loadState: "break",
     });
-    addTimelineSegment(timeline, { ...segment, workStart: breakAt, workEnd: end, points: segment.type === "travel" ? [point, segment.points[segment.points.length - 1]] : segment.points });
+    addTimelineSegment(timeline, { ...segment, workStart: breakAt, workEnd: end, points: tailPoints });
     return;
   }
   timeline.push({
@@ -2094,12 +2121,14 @@ function reserveRoute(route, start, reservations, label, blockPassageReservation
   }
 }
 
-function nextBlockOccupancyStart(blockId, earliestStart, passageReservations) {
+function nextBlockOccupancyStart(blockId, earliestStart, duration, passageReservations) {
   if (!passageReservations) return earliestStart;
   let start = Math.max(0, earliestStart);
   const bookings = passageReservations.get(blockId) || [];
-  for (const booking of bookings) {
-    if (booking.end > start) start = booking.end;
+  for (let guard = 0; guard < 200; guard += 1) {
+    const conflict = bookings.find((booking) => intervalsOverlap(start, start + duration, booking));
+    if (!conflict) return start;
+    start = conflict.end;
   }
   return start;
 }
@@ -2326,7 +2355,7 @@ function simulateDailyPlanMethod(planRows, demandByFlower, input) {
       const emptyStart = movement.start;
       const emptyEnd = emptyStart + emptyRoute.timeMinutes;
       let blockStart = nextBlockStart(state.row.block.id, emptyEnd, BLOCK_MINUTES, blockReservations);
-      blockStart = nextBlockOccupancyStart(state.row.block.id, blockStart, blockPassageReservations);
+      blockStart = nextBlockOccupancyStart(state.row.block.id, blockStart, BLOCK_MINUTES, blockPassageReservations);
       blockStart = nextBlockStart(state.row.block.id, blockStart, BLOCK_MINUTES, blockReservations);
       const blockEnd = blockStart + BLOCK_MINUTES;
       const soloRoute = cachedRoute(state.row.block, state.row.post);
@@ -2784,7 +2813,27 @@ function renderErrorCard(label, message) {
   return card;
 }
 
+const SIMULATION_DEBOUNCE_MS = 150;
+let simulationDebounceId = null;
+
+function cancelPendingSimulation() {
+  if (simulationDebounceId === null) return;
+  clearTimeout(simulationDebounceId);
+  simulationDebounceId = null;
+}
+
+// Un recalculo completo cuesta cientos de milisegundos, asi que al teclear se agrupan
+// los cambios en vez de recalcular por cada pulsacion.
+function scheduleSimulation() {
+  cancelPendingSimulation();
+  simulationDebounceId = setTimeout(() => {
+    simulationDebounceId = null;
+    calculateSimulation();
+  }, SIMULATION_DEBOUNCE_MS);
+}
+
 function calculateSimulation() {
+  cancelPendingSimulation();
   const planRows = selectedPlanRows();
   if (!planRows.length) return;
   const bucketStems = Math.max(1, readNumber(els.simBucketStems, 150));
@@ -3024,7 +3073,7 @@ function bindEvents() {
     els.simBucketsPerTrailer,
     els.simTractorSpeed,
   ].filter(Boolean);
-  for (const control of simulationControls) control.addEventListener("input", calculateSimulation);
+  for (const control of simulationControls) control.addEventListener("input", scheduleSimulation);
   els.simDailyDemandToggle?.addEventListener("click", toggleDailyBlockDemand);
   els.addPlanBlockButton?.addEventListener("click", () => addPlanRow());
   els.routeButton?.addEventListener("click", calculateSimulation);

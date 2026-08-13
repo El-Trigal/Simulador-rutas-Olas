@@ -31,9 +31,6 @@ Validacion minima antes de commitear:
 
 ```bash
 node --check app.js
-node --check scheduler.js
-node --check tracker.js
-node --check tracking-dashboard.js
 ```
 
 No hay tests automatizados. Cualquier cambio a la simulacion se verifica a mano:
@@ -48,10 +45,11 @@ que `#routeSummary` deja de decir "Sin simulacion.", y que la consola no tiene e
 | `index.html` + `app.js` + `styles.css` | **activo** | La aplicacion. Es lo unico que se usa. |
 | `data/*.geojson` | activo | Bloques, cable via, via de tractor, poscosechas. |
 | `legacy-data/Lagos y Construcciones.geojson` | activo | Capa de fondo (lagos/construcciones). |
-| `tracker.html` + `tracker.js` + `tracker.css` | **roto en produccion** | Transmisor GPS movil. Llama `/api/tracking/*`, que no existe en un host estatico. Pendiente de decidir si se completa o se borra. |
 
-`scheduler.js` y `tracking-dashboard.js` se borraron: ningun HTML los cargaba y dependian
-de endpoints `/api/...` inexistentes. Estan en el historial de git si hacen falta.
+Ya no queda nada mas: `scheduler.js`, `tracking-dashboard.js` y el transmisor GPS
+(`tracker.html` + `tracker.js` + `tracker.css`, con su CSS y sus capas SVG) se borraron
+porque dependian de endpoints `/api/...` que no existen en un host estatico. El tracker
+se servia publicado y roto. Todo esta en el historial de git si se retoma con backend.
 
 `app.js` es un unico archivo de ~3050 lineas sin modulos internos. Secciones, en orden:
 

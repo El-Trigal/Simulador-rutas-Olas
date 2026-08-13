@@ -50,6 +50,27 @@ const FLOWER_CONFIGS = {
   supermun: { label: "Supermun", postId: "1", demandInput: "simSupermunDemand", defaultDemand: 20000, cutterRate: 450 },
 };
 
+// Fuente unica de los limites de cada control. De aqui salen tanto los atributos del DOM
+// (applyControlLimits) como los recortes al leerlos (readControl), que antes vivian
+// duplicados en index.html y en el codigo y podian quedar descuadrados sin avisar.
+// Las reglas de negocio que hay detras estan en AGENTS.md.
+const CONTROL_LIMITS = {
+  simPomponDemand: { min: 0, step: 1000, value: FLOWER_CONFIGS.pompon.defaultDemand },
+  simSpiderDemand: { min: 0, step: 1000, value: FLOWER_CONFIGS.spider.defaultDemand },
+  simSupermunDemand: { min: 0, step: 1000, value: FLOWER_CONFIGS.supermun.defaultDemand },
+  simBucketStems: { min: 1, step: 1, value: 150 },
+  simWeeklyHours: { min: 0, step: 0.5, value: 42 },
+  simGarruchas: { min: 0, max: 9, step: 1, value: 9, integer: true },
+  simWagons: { min: 1, max: 13, step: 1, value: 13, integer: true },
+  simBucketsPerWagon: { min: 1, max: 2, step: 1, value: 2, integer: true },
+  simCableSpeed: { min: 1, max: 350, step: 1, value: 55 },
+  simTractors: { min: 0, max: 2, step: 1, value: 2, integer: true },
+  simTrailers: { min: 1, max: 7, step: 1, value: 7, integer: true },
+  simBucketsPerTrailer: { min: 1, max: 12, step: 1, value: 12, integer: true },
+  simTractorSpeed: { min: 1, max: 350, step: 1, value: 250 },
+  simPlaybackSpeed: { min: 1, max: 250, step: 1, value: 10, integer: true },
+};
+
 const BLOCK_MINUTES = 5;
 const POST_MINUTES = 5;
 const WORK_DAYS_PER_WEEK = 6;
@@ -60,7 +81,6 @@ const BREAK_DURATION_MINUTES = 45;
 const BREAK_START_WORK_MINUTES = BREAK_START_CLOCK_MINUTES - WORK_START_MINUTES;
 
 const state = {
-  mode: "block-block",
   data: null,
   blocks: [],
   posts: [],
@@ -105,23 +125,12 @@ const els = {
   cutterLayer: document.getElementById("cutterLayer"),
   simulationLayer: document.getElementById("simulationLayer"),
   labelLayer: document.getElementById("labelLayer"),
-  originLabel: document.getElementById("originLabel"),
-  destinationLabel: document.getElementById("destinationLabel"),
-  originSelect: document.getElementById("originSelect"),
-  destinationSelect: document.getElementById("destinationSelect"),
-  speedLabel: document.getElementById("speedLabel"),
-  speedInput: document.getElementById("speedInput"),
-  speedRange: document.getElementById("speedRange"),
   routeButton: document.getElementById("routeButton"),
-  metricCable: document.getElementById("metricCable"),
-  metricTime: document.getElementById("metricTime"),
   routeSummary: document.getElementById("routeSummary"),
   zoomIn: document.getElementById("zoomIn"),
   zoomOut: document.getElementById("zoomOut"),
   fitMap: document.getElementById("fitMap"),
   clearRoute: document.getElementById("clearRoute"),
-  simFlowerSelect: document.getElementById("simFlowerSelect"),
-  simBlockSelect: document.getElementById("simBlockSelect"),
   simBlockPlan: document.getElementById("simBlockPlan"),
   simDailyDemandToggle: document.getElementById("simDailyDemandToggle"),
   addPlanBlockButton: document.getElementById("addPlanBlockButton"),
@@ -1419,7 +1428,7 @@ function updatePlaybackUi() {
   const sim = state.simulation;
   const hasPlayback = sim.vehicles.length > 0 || sim.cutterBlocks.length > 0;
   if (els.simPlaybackSpeed) {
-    sim.speedMultiplier = Math.max(1, Math.min(250, Number(els.simPlaybackSpeed.value) || 10));
+    sim.speedMultiplier = readControl("simPlaybackSpeed");
     els.simPlaybackSpeed.value = String(sim.speedMultiplier);
     if (els.simPlaybackSpeedLabel) els.simPlaybackSpeedLabel.textContent = `${sim.speedMultiplier}x`;
   }
@@ -1609,8 +1618,25 @@ function readNumber(input, fallback = 0) {
   return Number.isFinite(value) ? value : fallback;
 }
 
-function readInteger(input, fallback = 0) {
-  return Math.max(0, Math.floor(readNumber(input, fallback)));
+// Escribe en el DOM los limites declarados en CONTROL_LIMITS, para que el control muestre
+// exactamente lo mismo que despues aplica readControl.
+function applyControlLimits() {
+  for (const [key, limits] of Object.entries(CONTROL_LIMITS)) {
+    const input = els[key];
+    if (!input) continue;
+    if (limits.min !== undefined) input.min = String(limits.min);
+    if (limits.max !== undefined) input.max = String(limits.max);
+    if (limits.step !== undefined) input.step = String(limits.step);
+    input.value = String(limits.value);
+  }
+}
+
+function readControl(key) {
+  const limits = CONTROL_LIMITS[key];
+  let value = readNumber(els[key], limits.value);
+  if (limits.min !== undefined) value = Math.max(limits.min, value);
+  if (limits.max !== undefined) value = Math.min(limits.max, value);
+  return limits.integer ? Math.floor(value) : value;
 }
 
 function formatInteger(value) {
@@ -1668,7 +1694,7 @@ function weeklyDailyDemandForRow(row) {
   const flowerKey = FLOWER_CONFIGS[row.flowerKey] ? row.flowerKey : "pompon";
   const flower = FLOWER_CONFIGS[flowerKey];
   const count = Math.max(1, state.planRows.filter((item) => item.flowerKey === flowerKey).length);
-  const weeklyDemand = Math.max(0, readNumber(els[flower.demandInput], flower.defaultDemand));
+  const weeklyDemand = readControl(flower.demandInput);
   return weeklyDemand / WORK_DAYS_PER_WEEK / count;
 }
 
@@ -1811,7 +1837,7 @@ function demandPlanByFlower(planRows, weeklyHours = 0) {
   for (const [flowerKey, count] of counts) {
     const flower = FLOWER_CONFIGS[flowerKey];
     const rowsForFlower = planRows.filter((row) => row.flowerKey === flowerKey);
-    const weeklyDemandInput = Math.max(0, readNumber(els[flower.demandInput], flower.defaultDemand));
+    const weeklyDemandInput = readControl(flower.demandInput);
     const dailyDemand = manualMode ? rowsForFlower.reduce((sum, row) => sum + Math.max(0, Number(row.dailyDemand) || 0), 0) : weeklyDemandInput / WORK_DAYS_PER_WEEK;
     const weeklyDemand = manualMode ? dailyDemand * WORK_DAYS_PER_WEEK : weeklyDemandInput;
     const cutterHoursWeek = flower.cutterRate > 0 ? weeklyDemand / flower.cutterRate : 0;
@@ -1942,9 +1968,9 @@ function routeForNetwork(origin, destination, speed, networkType, blockedBlockId
 
 function methodInputs(networkType, bucketStems, weeklyHours) {
   if (networkType === "tractor") {
-    const units = Math.max(0, Math.min(2, readInteger(els.simTractors, 2)));
-    const trailers = Math.min(7, Math.max(1, readInteger(els.simTrailers, 7)));
-    const bucketsPerTrailer = Math.min(12, Math.max(1, readInteger(els.simBucketsPerTrailer, 12)));
+    const units = readControl("simTractors");
+    const trailers = readControl("simTrailers");
+    const bucketsPerTrailer = readControl("simBucketsPerTrailer");
     const bucketsPerTrip = trailers * bucketsPerTrailer;
     return {
       networkType,
@@ -1957,16 +1983,16 @@ function methodInputs(networkType, bucketStems, weeklyHours) {
       maxLoadSets: 4,
       routeColor: "#7a5b2b",
       units,
-      speed: Math.max(1, readNumber(els.simTractorSpeed, 250)),
+      speed: readControl("simTractorSpeed"),
       bucketsPerTrip,
       stemsPerTrip: bucketsPerTrip * bucketStems,
       setsPerOperator: 2,
       weeklyHours,
     };
   }
-  const units = Math.max(0, Math.min(9, readInteger(els.simGarruchas, 9)));
-  const wagons = Math.min(13, Math.max(1, readInteger(els.simWagons, 13)));
-  const bucketsPerWagon = Math.min(2, Math.max(1, readInteger(els.simBucketsPerWagon, 2)));
+  const units = readControl("simGarruchas");
+  const wagons = readControl("simWagons");
+  const bucketsPerWagon = readControl("simBucketsPerWagon");
   const bucketsPerTrip = wagons * bucketsPerWagon;
   return {
     networkType: "cable",
@@ -1979,45 +2005,13 @@ function methodInputs(networkType, bucketStems, weeklyHours) {
     maxLoadSets: units * 2,
     routeColor: "#0677c8",
     units,
-    speed: Math.max(1, readNumber(els.simCableSpeed, 55)),
+    speed: readControl("simCableSpeed"),
     bucketsPerTrip,
     stemsPerTrip: bucketsPerTrip * bucketStems,
     setsPerOperator: 2,
     weeklyHours,
   };
 }
-
-function simulateMethod(origin, destination, demand, input) {
-  if (input.units <= 0) throw new Error("No hay equipos activos para este metodo.");
-  const route = routeForNetwork(origin, destination, input.speed, input.networkType);
-  const travelMinutes = route.cableDistance / input.speed;
-  const cycleMinutes = BLOCK_MINUTES + travelMinutes + POST_MINUTES;
-  const tripsNeeded = input.stemsPerTrip > 0 ? Math.ceil(demand / input.stemsPerTrip) : 0;
-  const hoursNeeded = (tripsNeeded * cycleMinutes) / 60;
-  const availableHours = input.units * input.weeklyHours;
-  const stemsPerHour = cycleMinutes > 0 ? input.stemsPerTrip * (60 / cycleMinutes) : 0;
-  const fleetStemsPerHour = stemsPerHour * input.units;
-  const dailyCapacity = fleetStemsPerHour * (input.weeklyHours / WORK_DAYS_PER_WEEK);
-  const fleetTrips = cycleMinutes > 0 ? Math.floor((availableHours * 60) / cycleMinutes) : 0;
-  const weeklyCapacity = fleetTrips * input.stemsPerTrip;
-  return {
-    ...input,
-    route: { ...route, routeColor: input.routeColor },
-    distance: route.cableDistance,
-    travelMinutes,
-    cycleMinutes,
-    tripsNeeded,
-    hoursNeeded,
-    availableHours,
-    stemsPerHour,
-    fleetStemsPerHour,
-    dailyCapacity,
-    fleetTrips,
-    weeklyCapacity,
-    balance: weeklyCapacity - demand,
-  };
-}
-
 
 function workToWallStart(workMinutes) {
   return workMinutes < BREAK_START_WORK_MINUTES ? workMinutes : workMinutes + BREAK_DURATION_MINUTES;
@@ -2755,10 +2749,6 @@ function renderCutterSummaryCard(cutterPlan) {
   return card;
 }
 
-function inputDailyHours() {
-  return Math.max(0.0001, Math.max(0, readNumber(els.simWeeklyHours, 42)) / WORK_DAYS_PER_WEEK);
-}
-
 function renderMethodCard(result) {
   const card = document.createElement("div");
   card.className = `method-card ${result.networkType === "tractor" ? "tractor" : ""} ${result.feasible ? "" : "error"}`;
@@ -2862,8 +2852,8 @@ function calculateSimulation() {
   cancelPendingSimulation();
   const planRows = selectedPlanRows();
   if (!planRows.length) return;
-  const bucketStems = Math.max(1, readNumber(els.simBucketStems, 150));
-  const weeklyHours = Math.max(0, readNumber(els.simWeeklyHours, 42));
+  const bucketStems = readControl("simBucketStems");
+  const weeklyHours = readControl("simWeeklyHours");
   const demandByFlower = demandPlanByFlower(planRows, weeklyHours);
   const mode = selectedTransportMode();
   const methods = mode === "both" ? ["cable", "tractor"] : [mode];
@@ -2935,98 +2925,10 @@ function activeNetwork() {
   return network;
 }
 
-function updateNetworkUi() {
-  document.querySelectorAll(".network-button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.network === state.networkType);
-  });
-  if (els.speedLabel) els.speedLabel.textContent = state.networkType === "tractor" ? "Velocidad tractor" : "Velocidad garrucha";
-}
-
-function getModeTypes() {
-  if (state.mode === "block-post") return { origin: "block", destination: "post" };
-  if (state.mode === "post-block") return { origin: "post", destination: "block" };
-  return { origin: "block", destination: "block" };
-}
-
-function updateMode() {
-  const types = getModeTypes();
-  els.originLabel.textContent = types.origin === "block" ? "Bloque origen" : "Poscosecha origen";
-  els.destinationLabel.textContent = types.destination === "block" ? "Bloque destino" : "Poscosecha destino";
-  fillSelect(els.originSelect, types.origin);
-  fillSelect(els.destinationSelect, types.destination);
-  if (types.origin === types.destination && els.destinationSelect.options.length > 1) {
-    els.destinationSelect.selectedIndex = 1;
-  }
-  syncSelectionFromControls();
-  clearRoute(true);
-}
-
-function fillSelect(select, type) {
-  const source = type === "block" ? state.blocks : state.posts;
-  clearElement(select);
-  for (const item of source) {
-    const option = document.createElement("option");
-    option.value = item.id;
-    option.textContent = item.label;
-    select.appendChild(option);
-  }
-}
-
 function entityByTypeAndId(type, id) {
   const source = type === "block" ? state.blocks : state.posts;
   const entity = source.find((item) => item.id === id);
   return entity ? { ...entity, type } : null;
-}
-
-function syncSelectionFromControls() {
-  const types = getModeTypes();
-  state.selected.origin = entityByTypeAndId(types.origin, els.originSelect.value);
-  state.selected.destination = entityByTypeAndId(types.destination, els.destinationSelect.value);
-  updateSelectionStyles();
-}
-
-function getSpeed() {
-  const value = Math.max(1, Number(els.speedInput.value) || 1);
-  els.speedInput.value = String(value);
-  els.speedRange.value = String(Math.min(350, value));
-  return value;
-}
-
-function calculateAndDrawRoute() {
-  syncSelectionFromControls();
-  const origin = state.selected.origin;
-  const destination = state.selected.destination;
-  if (!origin || !destination) return;
-  if (origin.type === destination.type && origin.id === destination.id) {
-    showRouteError("Selecciona dos elementos diferentes.");
-    return;
-  }
-
-  try {
-    const route = calculateRoute(origin, destination, getSpeed());
-    state.route = route;
-    updateMetrics(route);
-    renderRoute();
-    updateSelectionStyles();
-    els.hint.textContent = `${origin.label} -> ${destination.label}`;
-  } catch (error) {
-    showRouteError(error.message);
-  }
-}
-
-function updateMetrics(route) {
-  if (els.metricCable) els.metricCable.textContent = formatMeters(route.cableDistance);
-  if (els.metricTime) els.metricTime.textContent = formatMinutes(route.timeMinutes);
-  if (els.routeSummary) els.routeSummary.textContent = `${route.origin.label} -> ${route.destination.label}. ${route.networkLabel}: ${formatMeters(route.cableDistance)}. Tiempo estimado: ${formatMinutes(route.timeMinutes)}.`;
-}
-
-function showRouteError(message) {
-  state.route = null;
-  renderRoute();
-  if (els.metricCable) els.metricCable.textContent = "-";
-  if (els.metricTime) els.metricTime.textContent = "-";
-  if (els.routeSummary) els.routeSummary.textContent = message;
-  els.hint.textContent = message;
 }
 
 function clearRoute(resetMetrics = true) {
@@ -3034,46 +2936,9 @@ function clearRoute(resetMetrics = true) {
   renderRoute();
   updateSelectionStyles();
   if (resetMetrics) {
-    if (els.metricCable) els.metricCable.textContent = "-";
-    if (els.metricTime) els.metricTime.textContent = "-";
     if (els.routeSummary) els.routeSummary.textContent = "Sin simulacion.";
     els.hint.textContent = "Listo";
   }
-}
-
-export function getPlannerEntities() {
-  return {
-    blocks: state.blocks.map((item) => ({ id: item.id, label: item.label, type: "block" })),
-    posts: state.posts.map((item) => ({ id: item.id, label: item.label, type: "post" })),
-  };
-}
-
-export function calculatePlannerRoute(originType, originId, destinationType, destinationId, speed, networkType = "cable") {
-  const origin = entityByTypeAndId(originType, String(originId));
-  const destination = entityByTypeAndId(destinationType, String(destinationId));
-  if (!origin || !destination) throw new Error("Selecciona un origen y destino validos.");
-  if (origin.type === destination.type && origin.id === destination.id) throw new Error("Origen y destino deben ser diferentes.");
-  const previousNetworkType = state.networkType;
-  state.networkType = networkType;
-  try {
-    return calculateRoute(origin, destination, Number(speed));
-  } finally {
-    state.networkType = previousNetworkType;
-  }
-}
-
-export function displayPlannerRoute(route, routeColor = null) {
-  if (route.networkType && state.networks[route.networkType]) {
-    state.networkType = route.networkType;
-    updateNetworkUi();
-  }
-  state.route = { ...route, routeColor };
-  state.selected.origin = route.origin;
-  state.selected.destination = route.destination;
-  updateMetrics(route);
-  renderRoute();
-  updateSelectionStyles();
-  els.hint.textContent = `${route.origin.label} -> ${route.destination.label}`;
 }
 
 function bindEvents() {
@@ -3178,11 +3043,11 @@ function bindMapNavigation() {
 }
 
 async function init() {
+  applyControlLimits();
   bindEvents();
   try {
     await loadData();
     calculateSimulation();
-    window.dispatchEvent(new CustomEvent("route-planner-ready"));
   } catch (error) {
     els.status.textContent = "Error cargando datos";
     els.hint.textContent = error.message;

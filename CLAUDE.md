@@ -48,43 +48,47 @@ que `#routeSummary` deja de decir "Sin simulacion.", y que la consola no tiene e
 | `index.html` + `app.js` + `styles.css` | **activo** | La aplicacion. Es lo unico que se usa. |
 | `data/*.geojson` | activo | Bloques, cable via, via de tractor, poscosechas. |
 | `legacy-data/Lagos y Construcciones.geojson` | activo | Capa de fondo (lagos/construcciones). |
-| `tracker.html` + `tracker.js` + `tracker.css` | **roto en produccion** | Transmisor GPS movil. Llama `/api/tracking/*`, que no existe en un host estatico. |
-| `scheduler.js` | **huerfano** | Ningun HTML lo carga. Espera un backend `/api/schedules`. |
-| `tracking-dashboard.js` | **huerfano** | Ningun HTML lo carga. Espera `/api/tracking/live`. |
+| `tracker.html` + `tracker.js` + `tracker.css` | **roto en produccion** | Transmisor GPS movil. Llama `/api/tracking/*`, que no existe en un host estatico. Pendiente de decidir si se completa o se borra. |
 
-`app.js` es un unico archivo de ~3100 lineas sin modulos internos. Secciones, en orden:
+`scheduler.js` y `tracking-dashboard.js` se borraron: ningun HTML los cargaba y dependian
+de endpoints `/api/...` inexistentes. Estan en el historial de git si hacen falta.
 
-1. **Constantes de dominio** (1-60): capacidades, jornada, rendimientos, productos.
-2. **Geometria y GeoJSON** (158-490): centroides, poligonos, interseccion segmento/bloque.
-3. **Construccion del grafo** (493-680): parte los tramos en sus intersecciones y arma
-   nodos/aristas. `graphFromSegments` (629) corre una sola vez al cargar.
-4. **Ruteo** (684-985): `calculateRoute` (744) engancha origen y destino a la red y corre
-   `dijkstra` (887). Soporta excluir bloques (`blockedBlockIds`) para calcular desvios.
-5. **Render del mapa y de la animacion** (1018-1560).
-6. **Plan del dia y demanda** (1582-1900): filas de bloque/flor, reparto semanal vs diario.
-7. **Motor de simulacion** (2011-2660): `simulateDailyPlanMethod` (2135) es el corazon.
+`app.js` es un unico archivo de ~3050 lineas sin modulos internos. Secciones, en orden:
+
+1. **Constantes de dominio** (1-80): capacidades, jornada, rendimientos, productos y
+   `CONTROL_LIMITS`.
+2. **Geometria y GeoJSON** (167-500): centroides, poligonos, interseccion segmento/bloque.
+3. **Construccion del grafo** (502-690): parte los tramos en sus intersecciones y arma
+   nodos/aristas. `graphFromSegments` (638) corre una sola vez al cargar.
+4. **Ruteo** (693-995): `calculateRoute` (753) engancha origen y destino a la red y corre
+   `dijkstra` (896). Soporta excluir bloques (`blockedBlockIds`) para calcular desvios.
+5. **Render del mapa y de la animacion** (1027-1600).
+6. **Plan del dia y demanda** (1616-1930): filas de bloque/flor, reparto semanal vs diario.
+7. **Motor de simulacion** (2030-2700): `simulateDailyPlanMethod` (2184) es el corazon.
    Adentro, `scheduleWith` es un greedy que asigna operarios a bloques respetando
-   reservas de tramo, de maniobra y de ocupacion de bloque.
-8. **Render de resultados y arranque** (2658-3119).
+   reservas de tramo, de maniobra y de ocupacion de bloque. `nextRouteStart` (2077) es el
+   punto caliente.
+8. **Render de resultados y arranque** (2707-3059).
+
+Las lineas son orientativas: sirven para ubicarse, no para citar.
 
 ### Flujo principal
 
-`init()` (3105) -> `loadData()` -> `calculateSimulation()` (2787), que es tambien el
+`init()` (3045) -> `loadData()` -> `calculateSimulation()` (2851), que es tambien el
 handler de **cada** cambio en los controles. `calculateSimulation` arma el plan, llama
 `simulateDailyPlanMethod` por metodo (garruchas y/o tractor), calcula el plan de
 cortadores, dibuja rutas y prepara la reproduccion.
 
 ## Reglas de dominio
 
-Estan en `AGENTS.md` y siguen vigentes. Al tocarlas hay que recordar que **cada limite
-vive duplicado en tres lugares**:
+Estan en `AGENTS.md` y siguen vigentes. Los limites de los controles tienen **una sola
+fuente en el codigo**: la tabla `CONTROL_LIMITS`, de la que salen tanto los atributos
+`min`/`max`/`step`/`value` del DOM (`applyControlLimits`, llamada desde `init`) como el
+recorte al leerlos (`readControl`). Los inputs de `index.html` van sin esos atributos a
+proposito: ponerlos ahi volveria a duplicar la regla.
 
-1. la prosa de `AGENTS.md`,
-2. los atributos `min`/`max`/`value` del input en `index.html`,
-3. el clamp en `methodInputs` (`app.js:1918`).
-
-Ejemplo: "maximo 9 garrucheros" aparece como `max="9" value="9"` en `index.html:41` y
-como `Math.min(9, ...)` en `app.js:1943`. Cambiar uno solo deja el simulador inconsistente.
+Para cambiar "maximo 9 garrucheros" basta editar `simGarruchas` en `CONTROL_LIMITS` (y la
+prosa de `AGENTS.md`, que sigue siendo la referencia de negocio).
 
 Constantes que solo viven en `app.js` (1-60): `BLOCK_MINUTES`, `POST_MINUTES`,
 `WORK_DAYS_PER_WEEK`, `GARRUCHERO_STEMS_PER_HOUR`, `WORK_START_MINUTES`,
@@ -100,12 +104,6 @@ confirmar que estan en la misma escala.
 
 ## Trampas conocidas
 
-- **`app.js` tiene codigo muerto.** `updateMode`, `calculateAndDrawRoute`, `fillSelect`,
-  `getSpeed`, `showRouteError` y `syncSelectionFromControls` referencian elementos
-  (`originSelect`, `destinationSelect`, `speedInput`) que **no existen** en `index.html`;
-  son `null` en `els`. Llamar a esas funciones lanza excepcion. Tambien hay tres `export`
-  (`getPlannerEntities`, `calculatePlannerRoute`, `displayPlannerRoute`) sin ningun
-  consumidor. No sirven de ejemplo: no copiar ese patron.
 - **Un recalculo completo cuesta ~120-240 ms con garruchas** (plan de 4-12 bloques,
   Chromium); el tractor es un orden de magnitud mas barato. Los eventos `input` pasan por
   `scheduleSimulation` (debounce de 150 ms), asi que al teclear se agrupa; los clics y los

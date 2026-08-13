@@ -29,27 +29,27 @@
 
           <section class="control-section simulator-grid">
             <div class="section-title">Demanda semanal</div>
-            <label class="field"><span>Pompon</span><input id="simPomponDemand" type="number" min="0" step="1000" value="600000" /></label>
-            <label class="field"><span>Spider</span><input id="simSpiderDemand" type="number" min="0" step="1000" value="450000" /></label>
-            <label class="field"><span>Supermun</span><input id="simSupermunDemand" type="number" min="0" step="1000" value="20000" /></label>
-            <label class="field"><span>Tallos por balde</span><input id="simBucketStems" type="number" min="1" step="1" value="150" /></label>
-            <label class="field"><span>Horas semanales</span><input id="simWeeklyHours" type="number" min="0" step="0.5" value="42" /></label>
+            <label class="field"><span>Pompon</span><input id="simPomponDemand" type="number" /></label>
+            <label class="field"><span>Spider</span><input id="simSpiderDemand" type="number" /></label>
+            <label class="field"><span>Supermun</span><input id="simSupermunDemand" type="number" /></label>
+            <label class="field"><span>Tallos por balde</span><input id="simBucketStems" type="number" /></label>
+            <label class="field"><span>Horas semanales</span><input id="simWeeklyHours" type="number" /></label>
           </section>
 
           <section class="control-section simulator-grid">
             <div class="section-title">Garruchas</div>
-            <label class="field"><span>Garrucheros disp.</span><input id="simGarruchas" type="number" min="0" max="9" step="1" value="9" /></label>
-            <label class="field"><span>Vagones</span><input id="simWagons" type="number" min="1" max="13" step="1" value="13" /></label>
-            <label class="field"><span>Baldes por vagon</span><input id="simBucketsPerWagon" type="number" min="1" max="2" step="1" value="2" /></label>
-            <label class="field"><span>Velocidad</span><input id="simCableSpeed" type="number" min="1" max="350" step="1" value="55" /></label>
+            <label class="field"><span>Garrucheros disp.</span><input id="simGarruchas" type="number" /></label>
+            <label class="field"><span>Vagones</span><input id="simWagons" type="number" /></label>
+            <label class="field"><span>Baldes por vagon</span><input id="simBucketsPerWagon" type="number" /></label>
+            <label class="field"><span>Velocidad</span><input id="simCableSpeed" type="number" /></label>
           </section>
 
           <section class="control-section simulator-grid">
             <div class="section-title">Tractor</div>
-            <label class="field"><span>Conductores disp.</span><input id="simTractors" type="number" min="0" max="2" step="1" value="2" /></label>
-            <label class="field"><span>Trailers</span><input id="simTrailers" type="number" min="1" max="7" step="1" value="7" /></label>
-            <label class="field"><span>Baldes por trailer</span><input id="simBucketsPerTrailer" type="number" min="1" max="12" step="1" value="12" /></label>
-            <label class="field"><span>Velocidad</span><input id="simTractorSpeed" type="number" min="1" max="350" step="1" value="250" /></label>
+            <label class="field"><span>Conductores disp.</span><input id="simTractors" type="number" /></label>
+            <label class="field"><span>Trailers</span><input id="simTrailers" type="number" /></label>
+            <label class="field"><span>Baldes por trailer</span><input id="simBucketsPerTrailer" type="number" /></label>
+            <label class="field"><span>Velocidad</span><input id="simTractorSpeed" type="number" /></label>
           </section>
 
           <button id="routeButton" class="primary-action" type="button">Simular viaje</button>
@@ -72,7 +72,7 @@
               </div>
               <label class="field">
                 <span>Velocidad de simulacion <strong id="simPlaybackSpeedLabel">10x</strong></span>
-                <input id="simPlaybackSpeed" class="speed-range" type="range" min="1" max="250" step="1" value="10" />
+                <input id="simPlaybackSpeed" class="speed-range" type="range" />
               </label>
               <div id="simPhaseText" class="route-summary">Calcula un viaje para reproducirlo.</div>
               <div class="cutter-live-panel">
